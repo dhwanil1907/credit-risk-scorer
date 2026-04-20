@@ -48,6 +48,10 @@ FEATURE_COLS = [
     "AGE_YEARS",                # Age in years (positive, converted from DAYS_BIRTH)
     "YEARS_EMPLOYED",           # Years at current job (positive)
     "CREDIT_TERM",              # Implied loan term in months
+    "EXT_MEAN",                     # Composite external credit score
+    "EXT_MEAN_X_ANNUITY_RATIO",     # Interaction: credit score × repayment burden
+    "EXT_MEAN_X_CREDIT_RATIO",      # Interaction: credit score × loan-to-income ratio
+    "DEBT_STRESS",                  # Combined overextension: annuity ratio + credit ratio
 
     # --- Bureau aggregates (joined from bureau.csv) ---
     # Each applicant may have many rows in bureau.csv (one per loan/credit product).
@@ -380,6 +384,21 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     # Implied loan duration in months: if you borrow $120,000 and repay $10,000/year,
     # the implied term is 12 months
     df["CREDIT_TERM"] = df["AMT_CREDIT"] / (df["AMT_ANNUITY"] + 1)
+
+    # Composite external credit score (average of all three sources)
+    ext_cols = [c for c in ["EXT_SOURCE_1", "EXT_SOURCE_2", "EXT_SOURCE_3"] if c in df.columns]
+    df["EXT_MEAN"] = df[ext_cols].mean(axis=1) if ext_cols else 0.5
+
+    # Interaction: good credit score vs repayment burden
+    # High EXT_MEAN + high ANNUITY_INCOME_RATIO = risky despite good score
+    df["EXT_MEAN_X_ANNUITY_RATIO"] = df["EXT_MEAN"] * df["ANNUITY_INCOME_RATIO"]
+
+    # Interaction: good credit score vs loan-to-income ratio
+    # High EXT_MEAN + high CREDIT_INCOME_RATIO = risky despite good score
+    df["EXT_MEAN_X_CREDIT_RATIO"] = df["EXT_MEAN"] * df["CREDIT_INCOME_RATIO"]
+
+    # Combined debt stress signal: total financial overextension
+    df["DEBT_STRESS"] = df["ANNUITY_INCOME_RATIO"] + df["CREDIT_INCOME_RATIO"]
 
     return df
 
