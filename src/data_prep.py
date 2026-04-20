@@ -387,14 +387,14 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # Composite external credit score (average of all three sources)
     ext_cols = [c for c in ["EXT_SOURCE_1", "EXT_SOURCE_2", "EXT_SOURCE_3"] if c in df.columns]
-    df["EXT_MEAN"] = df[ext_cols].mean(axis=1) if ext_cols else 0.5
+    df["EXT_MEAN"] = df[ext_cols].mean(axis=1) if ext_cols else np.nan
 
-    # Interaction: good credit score vs repayment burden
-    # High EXT_MEAN + high ANNUITY_INCOME_RATIO = risky despite good score
+    # Interaction: captures repayment burden for high-scoring applicants.
+    # A high value means good credit score but also heavy repayment obligations.
     df["EXT_MEAN_X_ANNUITY_RATIO"] = df["EXT_MEAN"] * df["ANNUITY_INCOME_RATIO"]
 
-    # Interaction: good credit score vs loan-to-income ratio
-    # High EXT_MEAN + high CREDIT_INCOME_RATIO = risky despite good score
+    # Interaction: captures loan-to-income strain for high-scoring applicants.
+    # A high value means good credit score but also extreme loan relative to income.
     df["EXT_MEAN_X_CREDIT_RATIO"] = df["EXT_MEAN"] * df["CREDIT_INCOME_RATIO"]
 
     # Combined debt stress signal: total financial overextension
