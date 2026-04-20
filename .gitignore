@@ -1,0 +1,19 @@
+# Data files — too large for GitHub (>100MB), download from Kaggle
+data/
+
+# Trained model files — regenerate with python src/train.py
+models/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.env
+
+# pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# macOS
+.DS_Store
