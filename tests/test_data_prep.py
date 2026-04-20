@@ -234,6 +234,73 @@ def test_engineer_features_adds_ratios():
     assert expected.issubset(engineered.columns), f"Missing engineered features: {expected - set(engineered.columns)}"
 
 
+def test_engineer_features_adds_interaction_features():
+    """
+    Verify that the 4 new interaction features are created by engineer_features().
+    """
+    df = make_application_df().copy()
+    df = clean_application(df)
+    df = encode_categoricals(df)
+    engineered = engineer_features(df)
+
+    new_features = {
+        "EXT_MEAN",
+        "EXT_MEAN_X_ANNUITY_RATIO",
+        "EXT_MEAN_X_CREDIT_RATIO",
+        "DEBT_STRESS",
+    }
+    assert new_features.issubset(engineered.columns), (
+        f"Missing interaction features: {new_features - set(engineered.columns)}"
+    )
+
+
+def test_ext_mean_is_average_of_ext_sources():
+    """
+    Verify EXT_MEAN equals the row-wise mean of EXT_SOURCE_1/2/3.
+    """
+    df = pd.DataFrame(
+        [
+            {
+                "AMT_CREDIT": 100000.0,
+                "AMT_INCOME_TOTAL": 50000.0,
+                "AMT_ANNUITY": 5000.0,
+                "DAYS_BIRTH": -10000,
+                "DAYS_EMPLOYED": -500,
+                "EXT_SOURCE_1": 0.4,
+                "EXT_SOURCE_2": 0.6,
+                "EXT_SOURCE_3": 0.8,
+            }
+        ]
+    )
+    result = engineer_features(df)
+    assert abs(result["EXT_MEAN"].iloc[0] - 0.6) < 1e-9, (
+        f"EXT_MEAN should be 0.6, got {result['EXT_MEAN'].iloc[0]}"
+    )
+
+
+def test_debt_stress_equals_sum_of_ratios():
+    """
+    Verify DEBT_STRESS = ANNUITY_INCOME_RATIO + CREDIT_INCOME_RATIO.
+    """
+    df = pd.DataFrame(
+        [
+            {
+                "AMT_CREDIT": 100000.0,
+                "AMT_INCOME_TOTAL": 50000.0,
+                "AMT_ANNUITY": 5000.0,
+                "DAYS_BIRTH": -10000,
+                "DAYS_EMPLOYED": -500,
+                "EXT_SOURCE_1": 0.5,
+                "EXT_SOURCE_2": 0.5,
+                "EXT_SOURCE_3": 0.5,
+            }
+        ]
+    )
+    result = engineer_features(df)
+    expected = result["ANNUITY_INCOME_RATIO"].iloc[0] + result["CREDIT_INCOME_RATIO"].iloc[0]
+    assert abs(result["DEBT_STRESS"].iloc[0] - expected) < 1e-9
+
+
 def test_split_data_stratified():
     """
     Verify that the 80/20 train/test split works correctly and keeps defaults in both halves.
