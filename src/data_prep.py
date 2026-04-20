@@ -6,8 +6,15 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
 
-# Single source of truth for all feature columns used in training and inference.
-# Both train.py and app.py must use this list — ensures no column mismatch.
+# ──────────────────────────────────────────────────────────────────────────────
+# FEATURE_COLS: the definitive list of inputs the model uses to make predictions
+#
+# Think of this as the "form" the model fills in for every applicant.
+# Every column here is a number the model has learned to weigh.
+# Both the training step (train.py) and the web app (app.py) must use this
+# exact same list in the exact same order — otherwise the model will be
+# reading the wrong numbers for the wrong fields.
+# ──────────────────────────────────────────────────────────────────────────────
 FEATURE_COLS = [
     # --- Raw numeric columns from application_train.csv ---
     "AMT_CREDIT",               # Loan amount
@@ -28,12 +35,14 @@ FEATURE_COLS = [
     "REGION_RATING_CLIENT_W_CITY",  # Same but city-weighted
 
     # --- Encoded categorical columns (label-encoded to integers) ---
+    # The model can only work with numbers, so text categories are converted:
     "CODE_GENDER",              # M→1, F→0, XNA→0
     "NAME_CONTRACT_TYPE",       # Cash loans→1, Revolving loans→0
     "FLAG_OWN_CAR",             # Y→1, N→0
     "FLAG_OWN_REALTY",          # Y→1, N→0
 
     # --- Engineered features (derived from raw columns) ---
+    # These are calculated columns that capture relationships the model finds useful
     "CREDIT_INCOME_RATIO",      # Loan amount relative to income
     "ANNUITY_INCOME_RATIO",     # Monthly repayment burden relative to income
     "AGE_YEARS",                # Age in years (positive, converted from DAYS_BIRTH)
@@ -41,6 +50,8 @@ FEATURE_COLS = [
     "CREDIT_TERM",              # Implied loan term in months
 
     # --- Bureau aggregates (joined from bureau.csv) ---
+    # Each applicant may have many rows in bureau.csv (one per loan/credit product).
+    # These columns collapse that history into a single summary per applicant.
     "bureau_count",                 # Total number of past credit records
     "bureau_active_count",          # Number of currently active credits
     "bureau_closed_count",          # Closed bureau lines (stability signal)
@@ -58,6 +69,7 @@ FEATURE_COLS = [
     "bureau_cnt_prolong_sum",       # Total prolongations (stress signal)
 
     # --- Optional: previous_application.csv ---
+    # Summarises all loan applications this person has made before (accepted or not)
     "prev_app_count",               # Number of prior applications
     "prev_amt_credit_sum",          # Sum of prior offered credits
     "prev_amt_credit_mean",         # Mean prior offered credit
@@ -66,6 +78,7 @@ FEATURE_COLS = [
     "prev_down_payment_sum",        # Sum of down payments on prior apps
 
     # --- Optional: installments_payments.csv ---
+    # Summarises whether the applicant paid their previous loans on time
     "inst_count",                   # Total number of instalment records
     "inst_days_late_mean",          # Mean days payment was late (DAYS_ENTRY_PAYMENT - DAYS_INSTALMENT)
     "inst_days_late_max",           # Worst single late payment in days
@@ -74,6 +87,7 @@ FEATURE_COLS = [
     "inst_underpay_sum",            # Total amount underpaid across all instalments
 
     # --- Optional: credit_card_balance.csv ---
+    # Summarises the applicant's credit card usage and payment behaviour
     "cc_count",                     # Number of monthly balance snapshots
     "cc_utilization_mean",          # Mean (balance / credit limit) — key stress signal
     "cc_utilization_max",           # Peak utilization
@@ -85,153 +99,208 @@ FEATURE_COLS = [
 
 def load_bureau_aggregates(bureau_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Collapse bureau.csv from one-row-per-credit to one-row-per-applicant.
+    Summarise each applicant's credit bureau history into a single row.
 
-    bureau.csv has multiple rows per SK_ID_CURR (one per credit line).
+    The raw bureau data has one row for every credit product a person has
+    ever had (e.g. a car loan, a credit card, a mortgage — each gets its
+    own row). This function collapses all of those rows so we end up with
+    one neat summary row per person, ready to be joined to their main
+    application.
+
     Aggregations are guarded by column presence so tests and thin CSVs still work.
     """
     b = bureau_df
     cols = set(bureau_df.columns)
+
+    # Decide which column to count — SK_ID_BUREAU is the unique ID per credit line
     count_key = "SK_ID_BUREAU" if "SK_ID_BUREAU" in cols else "SK_ID_CURR"
+
+    # Start building the summary: how many bureau records does this person have?
     spec: dict = {"bureau_count": (count_key, "count")}
 
+    # How many of their credits are still active vs fully paid off?
     if "CREDIT_ACTIVE" in cols:
         spec["bureau_active_count"] = ("CREDIT_ACTIVE", lambda s: (s.astype(str) == "Active").sum())
         spec["bureau_closed_count"] = ("CREDIT_ACTIVE", lambda s: (s.astype(str) == "Closed").sum())
 
+    # Overdue days: has the person been behind on payments? By how much on average?
     if "CREDIT_DAY_OVERDUE" in cols:
         spec["bureau_max_overdue"] = ("CREDIT_DAY_OVERDUE", "max")
         spec["bureau_mean_overdue"] = ("CREDIT_DAY_OVERDUE", "mean")
 
+    # Total outstanding debt across all credit lines
     if "AMT_CREDIT_SUM_DEBT" in cols:
         spec["bureau_total_debt"] = ("AMT_CREDIT_SUM_DEBT", "sum")
 
+    # Size of credit lines — how large are the loans they typically take?
     if "AMT_CREDIT_SUM" in cols:
         spec["bureau_avg_credit"] = ("AMT_CREDIT_SUM", "mean")
         spec["bureau_max_line_credit"] = ("AMT_CREDIT_SUM", "max")
 
+    # Total credit limit the person has been granted across all products
     if "AMT_CREDIT_SUM_LIMIT" in cols:
         spec["bureau_sum_limit"] = ("AMT_CREDIT_SUM_LIMIT", "sum")
 
+    # Total money currently overdue across all credit lines
     if "AMT_CREDIT_SUM_OVERDUE" in cols:
         spec["bureau_sum_overdue_amt"] = ("AMT_CREDIT_SUM_OVERDUE", "sum")
 
+    # How long has the person had credit? (signals experience/stability)
     if "DAYS_CREDIT" in cols:
         spec["bureau_mean_days_credit"] = ("DAYS_CREDIT", "mean")
 
+    # How diverse is their credit history? (mortgages, cards, car loans etc.)
     if "CREDIT_TYPE" in cols:
         spec["bureau_credit_type_nunique"] = ("CREDIT_TYPE", "nunique")
 
+    # Average annual repayment amount across their bureau credits
     if "AMT_ANNUITY" in cols:
         spec["bureau_mean_line_annuity"] = ("AMT_ANNUITY", "mean")
 
+    # Worst-ever overdue amount on a single credit line
     if "AMT_CREDIT_MAX_OVERDUE" in cols:
         spec["bureau_max_max_overdue"] = ("AMT_CREDIT_MAX_OVERDUE", "max")
 
+    # How many times did they ask to extend/delay repayment? More = financial stress
     if "CNT_CREDIT_PROLONG" in cols:
         spec["bureau_cnt_prolong_sum"] = ("CNT_CREDIT_PROLONG", "sum")
 
+    # Group by applicant ID and compute all the summaries above in one step
     return b.groupby("SK_ID_CURR").agg(**spec).reset_index()
 
 
 def load_previous_application_aggregates(prev_df: pd.DataFrame) -> pd.DataFrame:
     """
-    One row per SK_ID_CURR from previous_application.csv (prior loan applications).
+    Summarise each applicant's history of previous loan applications into one row.
 
-    File is optional — place next to application_train.csv after downloading from Kaggle
-    (Home Credit Default Risk): previous_application.csv.
+    People often apply for multiple loans over their lifetime. This file has
+    one row per prior application. We collapse them into a single summary per
+    person — for example: how many times have they applied? How much credit
+    have they been offered in total?
+
+    This file is optional — place it next to application_train.csv after
+    downloading from Kaggle (Home Credit Default Risk): previous_application.csv.
     """
     cols = set(prev_df.columns)
-    # One count per prior row; prefer SK_ID_PREV when present (one id per prior application).
+
+    # SK_ID_PREV is a unique ID per prior application (one person can have many)
     count_col = "SK_ID_PREV" if "SK_ID_PREV" in cols else "SK_ID_CURR"
+
+    # Start with: how many previous applications has this person made?
     spec: dict[str, tuple] = {"prev_app_count": (count_col, "count")}
 
+    # Total and average credit amounts offered across all previous applications
     if "AMT_CREDIT" in cols:
         spec["prev_amt_credit_sum"] = ("AMT_CREDIT", "sum")
         spec["prev_amt_credit_mean"] = ("AMT_CREDIT", "mean")
 
+    # Total of what the person asked for (vs what was offered)
     if "AMT_APPLICATION" in cols:
         spec["prev_amt_application_sum"] = ("AMT_APPLICATION", "sum")
 
+    # Total of all annual repayment amounts across previous loans
     if "AMT_ANNUITY" in cols:
         spec["prev_annuity_sum"] = ("AMT_ANNUITY", "sum")
 
+    # Total of all down payments made on previous applications
     if "AMT_DOWN_PAYMENT" in cols:
         spec["prev_down_payment_sum"] = ("AMT_DOWN_PAYMENT", "sum")
 
+    # Group by applicant and produce one summary row per person
     return prev_df.groupby("SK_ID_CURR").agg(**spec).reset_index()
 
 
 def load_installments_aggregates(inst_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Aggregate installments_payments.csv to one row per applicant.
+    Summarise each applicant's loan repayment behaviour into one row.
 
-    Key signals:
-    - days_late: positive = paid late, negative = paid early. Mean/max lateness captures
-      chronic vs occasional late payers.
-    - underpay: how much short of the required instalment was each payment? Chronic
-      underpayment is a strong default signal even when payments aren't technically missed.
+    This file has one row for every scheduled payment on every prior loan.
+    For example, if someone had a 12-month loan and a 24-month loan, this
+    file would have 36 rows for them.
+
+    We calculate two key signals:
+    - Lateness: did they pay on time, or were they consistently late?
+      A positive number means they paid after the due date (late).
+      A negative number means they paid before the due date (early).
+    - Underpayment: did they pay the full required amount?
+      If someone pays less than required each month, that is a warning sign
+      even if they don't technically miss a payment.
     """
     df = inst_df.copy()
 
     # Positive = paid late, negative = paid early
+    # This is calculated by comparing the actual payment date to the due date
     df["days_late"] = df["DAYS_ENTRY_PAYMENT"] - df["DAYS_INSTALMENT"]
 
-    # Underpayment: how much less than required was paid (floor at 0 — overpayments don't count)
+    # Underpayment: how much less than required was paid each time?
+    # We floor this at zero — overpaying is fine and shouldn't count negatively
     df["underpay"] = (df["AMT_INSTALMENT"] - df["AMT_PAYMENT"]).clip(lower=0)
 
+    # Collapse all payment rows into one summary per applicant
     agg = df.groupby("SK_ID_CURR").agg(
-        inst_count=("SK_ID_PREV", "count"),
-        inst_days_late_mean=("days_late", "mean"),
-        inst_days_late_max=("days_late", "max"),
-        inst_pct_late=("days_late", lambda x: (x > 0).mean()),   # fraction of late payments
-        inst_underpay_mean=("underpay", "mean"),
-        inst_underpay_sum=("underpay", "sum"),
+        inst_count=("SK_ID_PREV", "count"),           # Total number of payment records
+        inst_days_late_mean=("days_late", "mean"),     # Average lateness across all payments
+        inst_days_late_max=("days_late", "max"),       # Worst single late payment
+        inst_pct_late=("days_late", lambda x: (x > 0).mean()),   # What fraction of payments were late?
+        inst_underpay_mean=("underpay", "mean"),       # Average shortfall per payment
+        inst_underpay_sum=("underpay", "sum"),         # Total money never paid across all instalments
     ).reset_index()
     return agg
 
 
 def load_credit_card_aggregates(cc_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Aggregate credit_card_balance.csv to one row per applicant.
+    Summarise each applicant's credit card usage behaviour into one row.
 
-    Key signals:
-    - utilization: balance / credit_limit. High utilization = credit-stressed.
-      Clipped to [0, 1] to handle data entry errors where balance > limit.
-    - SK_DPD: days past due per statement. Any DPD > 0 is a delinquency signal.
+    This file has one row per monthly credit card statement per applicant.
+    We calculate two key signals:
+    - Utilization: what fraction of their credit limit are they using?
+      High utilization (e.g. 90% of limit) signals financial stress.
+      We cap this at 100% to handle any data errors where balance exceeds limit.
+    - Days past due (DPD): how many days overdue was the balance each month?
+      Any DPD > 0 means a missed or late payment on the credit card.
     """
     df = cc_df.copy()
 
-    # Utilization rate: balance as fraction of credit limit (capped at 1 to remove outliers)
+    # Utilization rate: how full is their credit card? (capped at 1.0 = 100%)
+    # We add 1 to the limit to avoid dividing by zero if the limit is missing
     df["utilization"] = (
         df["AMT_BALANCE"] / (df["AMT_CREDIT_LIMIT_ACTUAL"] + 1)
     ).clip(0, 1)
 
+    # Collapse all monthly statements into one summary per applicant
     agg = df.groupby("SK_ID_CURR").agg(
-        cc_count=("SK_ID_PREV", "count"),
-        cc_utilization_mean=("utilization", "mean"),
-        cc_utilization_max=("utilization", "max"),
-        cc_dpd_mean=("SK_DPD", "mean"),
-        cc_dpd_max=("SK_DPD", "max"),
-        cc_drawings_mean=("AMT_DRAWINGS_CURRENT", "mean"),
+        cc_count=("SK_ID_PREV", "count"),              # How many monthly snapshots exist?
+        cc_utilization_mean=("utilization", "mean"),   # Average monthly credit card usage rate
+        cc_utilization_max=("utilization", "max"),     # Highest usage rate ever recorded
+        cc_dpd_mean=("SK_DPD", "mean"),                # Average days overdue per month
+        cc_dpd_max=("SK_DPD", "max"),                  # Worst overdue month ever
+        cc_drawings_mean=("AMT_DRAWINGS_CURRENT", "mean"),  # Average monthly spending on the card
     ).reset_index()
     return agg
 
 
 def clean_application(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Fix known data quality issues in application_train.csv.
+    Fix known data quality issues in the main application file.
 
-    - DAYS_EMPLOYED == 365243 is a placeholder for unemployed/pensioners, not a real value.
-      Replace it with NaN so it doesn't corrupt ratios and model features.
-    - Impute all remaining numeric nulls with the column median (robust to outliers).
+    Two problems are addressed:
+    1. The value 365243 in the "days employed" column is a fake placeholder
+       that the data provider uses to indicate the person is not currently
+       employed (e.g. a pensioner or homemaker). It is not a real number of
+       days. We replace it with a blank (missing value) so it does not corrupt
+       any calculations.
+    2. Some other numeric columns have missing values. We fill those blanks
+       with the middle value (median) of that column — a safe, common approach
+       that is not thrown off by extreme outliers.
     """
     df = df.copy()
 
-    # 365243 is a sentinel value Kaggle uses for "not employed" — treat as missing
+    # 365243 is a sentinel/placeholder value meaning "not employed" — treat as missing
     df["DAYS_EMPLOYED"] = df["DAYS_EMPLOYED"].replace(365243, np.nan)
 
-    # Median imputation for all numeric columns that have missing values
+    # Fill all remaining missing numbers with the median of their column
+    # (median = the middle value when sorted, robust to extreme high/low outliers)
     numeric_cols = df.select_dtypes(include=[np.number]).columns
     for col in numeric_cols:
         if df[col].isna().any():
@@ -242,20 +311,26 @@ def clean_application(df: pd.DataFrame) -> pd.DataFrame:
 
 def encode_categoricals(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Convert string categorical columns to integers using explicit mappings.
+    Convert text-based columns into numbers the model can understand.
 
-    Only the four columns listed below are part of FEATURE_COLS. All other
-    object-dtype columns (e.g. occupation, housing type) are dropped since
-    they aren't in the feature set and would break numeric model inputs.
+    Machine learning models only work with numbers, not words. For example,
+    "Male" and "Female" must become 1 and 0. We use fixed, predetermined
+    mappings (not learned from data) so that the encoding is always the same
+    at training time and at prediction time — consistency is essential.
+
+    Only the four columns below are converted because they are in our feature
+    list. All other text columns (e.g. occupation type, housing type) are
+    removed because they are not used by this model.
     """
     df = df.copy()
 
-    # Explicit label mappings — kept deterministic (no fit/transform needed at inference)
-    gender_map = {"M": 1, "F": 0, "XNA": 0}
-    contract_map = {"Cash loans": 1, "Revolving loans": 0}
-    car_map = {"Y": 1, "N": 0}
-    realty_map = {"Y": 1, "N": 0}
+    # Fixed mappings from text labels to numbers
+    gender_map = {"M": 1, "F": 0, "XNA": 0}           # Male=1, Female=0, Unknown=0
+    contract_map = {"Cash loans": 1, "Revolving loans": 0}  # Cash loan=1, Revolving=0
+    car_map = {"Y": 1, "N": 0}                          # Owns car: Yes=1, No=0
+    realty_map = {"Y": 1, "N": 0}                       # Owns property: Yes=1, No=0
 
+    # Apply each mapping only if the column exists (handles partial datasets)
     if "CODE_GENDER" in df.columns:
         df["CODE_GENDER"] = df["CODE_GENDER"].map(gender_map)
     if "NAME_CONTRACT_TYPE" in df.columns:
@@ -265,7 +340,7 @@ def encode_categoricals(df: pd.DataFrame) -> pd.DataFrame:
     if "FLAG_OWN_REALTY" in df.columns:
         df["FLAG_OWN_REALTY"] = df["FLAG_OWN_REALTY"].map(realty_map)
 
-    # Drop any columns still holding string values (not in our feature set)
+    # Remove any remaining text columns — they are not part of the model's feature set
     object_cols = df.select_dtypes(include="object").columns
     df = df.drop(columns=object_cols)
 
@@ -274,26 +349,36 @@ def encode_categoricals(df: pd.DataFrame) -> pd.DataFrame:
 
 def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Add derived features that capture economic ratios and convert day-based
-    columns into human-readable units.
+    Create new calculated columns that capture financial relationships.
 
-    The +1 in denominators prevents division by zero for edge cases (zero income, zero annuity).
+    Raw numbers alone can be misleading. For example, a loan of $250,000
+    is very different for someone earning $30,000/year vs $300,000/year.
+    These new columns express the data as ratios and in more human-readable
+    units (years instead of days), which helps the model learn better.
+
+    Note: we add +1 to denominators throughout to avoid dividing by zero
+    in edge cases where income or annuity is recorded as zero.
     """
     df = df.copy()
 
-    # How large is the loan relative to income? High ratio = more financial strain
+    # How large is the loan compared to the person's annual income?
+    # A ratio of 5 means the loan is 5× their annual income — high financial strain
     df["CREDIT_INCOME_RATIO"] = df["AMT_CREDIT"] / (df["AMT_INCOME_TOTAL"] + 1)
 
-    # What fraction of income goes to repayment each year?
+    # What fraction of annual income goes to loan repayments each year?
+    # A ratio of 0.3 means 30% of income is consumed by repayments
     df["ANNUITY_INCOME_RATIO"] = df["AMT_ANNUITY"] / (df["AMT_INCOME_TOTAL"] + 1)
 
-    # DAYS_BIRTH is negative (days before application), flip sign and convert to years
+    # Convert age from days to years and make it a positive number
+    # (The raw data stores age as a negative number of days before the application date)
     df["AGE_YEARS"] = -df["DAYS_BIRTH"] / 365
 
-    # DAYS_EMPLOYED is negative for currently employed; flip sign → years at job
+    # Convert employment duration from days to years and make it positive
+    # (The raw data stores this as a negative number for currently employed people)
     df["YEARS_EMPLOYED"] = -df["DAYS_EMPLOYED"] / 365
 
-    # Implied repayment term in months (loan size / monthly payment)
+    # Implied loan duration in months: if you borrow $120,000 and repay $10,000/year,
+    # the implied term is 12 months
     df["CREDIT_TERM"] = df["AMT_CREDIT"] / (df["AMT_ANNUITY"] + 1)
 
     return df
@@ -306,51 +391,66 @@ def split_data(
     random_state: int = 42,
 ):
     """
-    Stratified 80/20 train/test split.
+    Divide the dataset into a training set (80%) and a testing set (20%).
 
-    Stratify=y ensures the ~8% default rate is preserved in both splits,
-    preventing an accidental imbalance that would skew evaluation metrics.
+    The model learns from the training set and is evaluated on the testing set.
+    The testing set is never used during training — it simulates real-world
+    applicants the model hasn't seen before.
+
+    We use stratified splitting, which means the proportion of defaulters
+    (~8%) is preserved in both halves. Without this, one half might
+    accidentally contain far fewer defaulters, making evaluation misleading.
     """
+    # stratify=y ensures the default rate (~8%) is the same in both train and test
     return train_test_split(X, y, test_size=test_size, random_state=random_state, stratify=y)
 
 
 def load_dataset(app_path: str, bureau_path: str):
     """
-    Full data pipeline from raw CSVs to train/test splits ready for modeling.
+    Run the complete data preparation pipeline from raw files to model-ready data.
 
-    Optional extra tables are merged when present in the same folder as application_train.csv:
-    - previous_application.csv — prior loan application history
-    - installments_payments.csv — payment punctuality and underpayment behaviour
-    - credit_card_balance.csv  — credit utilization and delinquency signals
+    This is the main entry point for data loading. It reads the raw CSV files,
+    joins supporting tables, fixes data issues, converts text to numbers,
+    creates calculated columns, and splits into training and testing sets.
 
-    Steps:
-        1. Load application + bureau CSVs
-        2. Aggregate bureau (and optional previous_application) to one row per applicant
-        3. Left-join onto application (missing history → zeros for numeric aggregates)
-        4. Clean anomalies and impute nulls
-        5. Encode categoricals
-        6. Engineer new features
-        7. Select FEATURE_COLS and save the list to outputs/feature_cols.json
-        8. Stratified split → return (X_train, X_test, y_train, y_test)
+    Optional supplementary files are used if they exist in the same folder:
+    - previous_application.csv — prior loan applications this person made
+    - installments_payments.csv — whether past loan payments were made on time
+    - credit_card_balance.csv  — credit card usage and payment history
+
+    Steps performed in order:
+        1. Load the main application file and the credit bureau file
+        2. Summarise bureau history to one row per applicant and join it on
+        3. Join any optional files (previous applications, payment history, credit cards)
+        4. Fix data quality issues and fill missing values
+        5. Convert text columns to numbers
+        6. Add calculated ratio and unit-conversion columns
+        7. Select only the columns the model will use, and save that list to disk
+        8. Split into training (80%) and testing (20%) sets and return them
     """
     app_df = pd.read_csv(app_path)
     bureau_df = pd.read_csv(bureau_path)
     data_dir = Path(app_path).parent
 
-    # Aggregate bureau then join — many applicants won't appear in bureau at all
+    # Summarise bureau history and attach it to the main application table.
+    # People who have no bureau records get zeros (no prior credit history on file).
     bureau_agg = load_bureau_aggregates(bureau_df)
     df = app_df.merge(bureau_agg, on="SK_ID_CURR", how="left")
 
+    # Fill any gaps from the bureau join with zero (person has no bureau history)
     bureau_join_cols = [c for c in bureau_agg.columns if c != "SK_ID_CURR"]
     df[bureau_join_cols] = df[bureau_join_cols].fillna(0)
 
+    # Join previous applications if the file exists in the data folder
     prev_path = data_dir / "previous_application.csv"
     if prev_path.is_file():
         prev_agg = load_previous_application_aggregates(pd.read_csv(prev_path))
         df = df.merge(prev_agg, on="SK_ID_CURR", how="left")
         prev_join_cols = [c for c in prev_agg.columns if c != "SK_ID_CURR"]
+        # People with no prior applications get zeros
         df[prev_join_cols] = df[prev_join_cols].fillna(0)
 
+    # Join instalment payment history if the file exists
     # Applicants with no instalment history get zeros (no payment behaviour on record)
     inst_path = data_dir / "installments_payments.csv"
     if inst_path.is_file():
@@ -359,6 +459,7 @@ def load_dataset(app_path: str, bureau_path: str):
         inst_join_cols = [c for c in inst_agg.columns if c != "SK_ID_CURR"]
         df[inst_join_cols] = df[inst_join_cols].fillna(0)
 
+    # Join credit card history if the file exists
     # Applicants with no credit card history get zeros
     cc_path = data_dir / "credit_card_balance.csv"
     if cc_path.is_file():
@@ -367,19 +468,28 @@ def load_dataset(app_path: str, bureau_path: str):
         cc_join_cols = [c for c in cc_agg.columns if c != "SK_ID_CURR"]
         df[cc_join_cols] = df[cc_join_cols].fillna(0)
 
+    # Fix data quality issues (e.g. the fake 365243 employment value) and fill missing numbers
     df = clean_application(df)
+
+    # Convert text categories (e.g. "Male"/"Female") to numbers the model can use
     df = encode_categoricals(df)
+
+    # Add calculated columns like "loan as % of income"
     df = engineer_features(df)
 
+    # TARGET is the column we are trying to predict: 1 = defaulted, 0 = repaid
     target = df["TARGET"]
 
-    # Guard against FEATURE_COLS listing a column not present in this dataset version
+    # Use only the columns in our agreed feature list.
+    # Some optional files may not be present, so we only include what is available.
     available_cols = [c for c in FEATURE_COLS if c in df.columns]
     X = df[available_cols]
 
-    # Persist the exact column list so app.py can align inference inputs at runtime
+    # Save the exact list of columns used so the web app can load the same list
+    # and guarantee it sends the model data in the correct column order
     os.makedirs("outputs", exist_ok=True)
     with open("outputs/feature_cols.json", "w") as f:
         json.dump(available_cols, f)
 
+    # Return training and testing sets (features and labels separately)
     return split_data(X, target)
