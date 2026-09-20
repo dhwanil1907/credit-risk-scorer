@@ -34,6 +34,36 @@ import streamlit as st
 
 from src.data_prep import encode_categoricals, engineer_features
 
+# Internal column names → plain labels shown in the UI
+FEATURE_LABELS: dict[str, str] = {
+    "EXT_SOURCE_1": "Credit bureau score #1",
+    "EXT_SOURCE_2": "Credit bureau score #2",
+    "EXT_SOURCE_3": "Credit bureau score #3",
+    "EXT_MEAN": "Average credit bureau score",
+    "CREDIT_INCOME_RATIO": "Loan size vs. income",
+    "ANNUITY_INCOME_RATIO": "Yearly payments vs. income",
+    "DEBT_STRESS": "Overall debt pressure",
+    "EXT_MEAN_X_ANNUITY_RATIO": "Credit score × payment burden",
+    "EXT_MEAN_X_CREDIT_RATIO": "Credit score × loan size",
+    "AGE_YEARS": "Age",
+    "YEARS_EMPLOYED": "Years at current job",
+    "AMT_CREDIT": "Loan amount",
+    "AMT_INCOME_TOTAL": "Annual income",
+    "AMT_ANNUITY": "Yearly loan payment",
+    "AMT_GOODS_PRICE": "Price of what they are buying",
+    "CREDIT_TERM": "Loan length (months)",
+    "bureau_max_overdue": "Worst late-payment streak (days)",
+    "bureau_count": "Past loans on credit file",
+    "bureau_total_debt": "Total existing debt",
+    "CODE_GENDER": "Gender",
+    "NAME_CONTRACT_TYPE": "Loan type",
+    "CNT_CHILDREN": "Number of children",
+}
+
+
+def _feature_label(column: str) -> str:
+    return FEATURE_LABELS.get(column, column.replace("_", " ").title())
+
 
 def _coerce_shap_matrix(raw: object, expected_shape: tuple[int, int]) -> np.ndarray:
     """
@@ -275,6 +305,24 @@ def preprocess_for_model(raw_df: pd.DataFrame, feature_cols: list[str]) -> pd.Da
     return out
 
 
+def _model_feature_names(model: object) -> list[str]:
+    """Column order stored in the fitted estimator (may differ from feature_cols.json)."""
+    names_in = getattr(model, "feature_names_in_", None)
+    if names_in is not None:
+        return [str(c) for c in names_in]
+    get_booster = getattr(model, "get_booster", None)
+    if get_booster is not None:
+        names = get_booster().feature_names
+        if names:
+            return [str(c) for c in names]
+    raise ValueError("Could not read feature names from the loaded model.")
+
+
+def _align_to_model(X: pd.DataFrame, model_columns: list[str]) -> pd.DataFrame:
+    """Drop or zero-fill columns so X matches what the saved estimator expects."""
+    return X.reindex(columns=model_columns, fill_value=0.0).astype(np.float64)
+
+
 def apply_guardrails(model_score: int, X_row: pd.DataFrame) -> tuple[int, list[str]]:
     """
     Apply business rule overrides on top of the model score.
@@ -306,23 +354,28 @@ def apply_guardrails(model_score: int, X_row: pd.DataFrame) -> tuple[int, list[s
         if score > 30:
             score = 30
         triggered.append(
-            f"Repayments exceed annual income (ratio: {annuity_ratio:.2f}x) — capped at 30"
+            f"Yearly loan payments are more than their annual income "
+            f"({annuity_ratio:.1f}× income) — score capped at 30"
         )
     elif annuity_ratio > 0.5:
         if score > 55:
             score = 55
         triggered.append(
-            f"Repayments exceed 50% of income (ratio: {annuity_ratio:.2f}x) — capped at 55"
+            f"Loan payments take over 50% of income ({annuity_ratio:.0%} of income) — score capped at 55"
         )
 
     if credit_ratio > 10.0:
         if score > 45:
             score = 45
-        triggered.append(f"Loan is {credit_ratio:.1f}× annual income — capped at 45")
+        triggered.append(
+            f"Loan is {credit_ratio:.1f}× annual income — too large — score capped at 45"
+        )
 
     if max_overdue > 60:
         score = max(0, score - 15)
-        triggered.append(f"Bureau record shows {int(max_overdue)} days overdue — score reduced by 15")
+        triggered.append(
+            f"Credit file shows {int(max_overdue)} days overdue on a past loan — score reduced by 15"
+        )
 
     return score, triggered
 
@@ -335,7 +388,7 @@ def main() -> None:
     user interacts with the sidebar — so the score and charts update instantly
     with every change.
     """
-    st.set_page_config(page_title="Credit Risk Scorer", layout="wide")
+    st.set_page_config(page_title="Loan Risk Checker", layout="wide", page_icon="📋")
 
     # Load all resources (cached — only happens once per server session)
     models = load_models()
@@ -344,37 +397,70 @@ def main() -> None:
     feature_cols = load_feature_cols()
     metrics_df = load_metrics_csv()
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # SIDEBAR: Inputs grouped by impact level
-    # The three external credit scores are the strongest predictors — put them
-    # first and label them clearly so users know where to look for big changes.
-    # ──────────────────────────────────────────────────────────────────────────
-    st.sidebar.title("Applicant Profile")
+    st.sidebar.title("Loan applicant")
+    with st.sidebar.expander("How to use this", expanded=True):
+        st.markdown(
+            "1. **Change any field** on the left — the score updates right away.\n\n"
+            "2. **Higher score = safer** (0 = very risky, 100 = very safe).\n\n"
+            "3. **Main panel** shows *why* the score changed in everyday language."
+        )
 
-    st.sidebar.markdown("### Credit Scores *(biggest impact)*")
-    st.sidebar.caption("Moving these sliders will produce the largest changes in the risk score.")
-    ext1 = st.sidebar.slider("External score 1", 0.0, 1.0, 0.5, 0.01)
-    ext2 = st.sidebar.slider("External score 2", 0.0, 1.0, 0.5, 0.01)
-    ext3 = st.sidebar.slider("External score 3", 0.0, 1.0, 0.5, 0.01)
+    st.sidebar.markdown("### Credit scores")
+    st.sidebar.caption("0 = poor history, 1 = strong history. These move the score the most.")
+    ext1 = st.sidebar.slider(
+        "Bureau score #1",
+        0.0,
+        1.0,
+        0.5,
+        0.01,
+        help="Third-party credit rating (higher is better).",
+    )
+    ext2 = st.sidebar.slider("Bureau score #2", 0.0, 1.0, 0.5, 0.01, help="Another bureau rating.")
+    ext3 = st.sidebar.slider("Bureau score #3", 0.0, 1.0, 0.5, 0.01, help="Another bureau rating.")
 
-    st.sidebar.markdown("### Financial Details")
-    income = st.sidebar.number_input("Annual income ($)", min_value=1.0, value=180_000.0, step=1000.0)
+    st.sidebar.markdown("### Money")
+    income = st.sidebar.number_input("Yearly income ($)", min_value=1.0, value=180_000.0, step=1000.0)
     loan = st.sidebar.number_input("Loan amount ($)", min_value=1.0, value=250_000.0, step=1000.0)
-    annuity = st.sidebar.number_input("Annual repayment / annuity ($)", min_value=0.0, value=15_000.0, step=500.0)
-    goods_price = st.sidebar.number_input("Goods price ($)", min_value=0.0, value=250_000.0, step=1000.0)
-    contract = st.sidebar.selectbox("Contract type", ["Cash loans", "Revolving loans"], index=0)
+    annuity = st.sidebar.number_input(
+        "Yearly payment on this loan ($)",
+        min_value=0.0,
+        value=15_000.0,
+        step=500.0,
+        help="Total they would pay toward this loan each year.",
+    )
+    goods_price = st.sidebar.number_input(
+        "Purchase price ($)",
+        min_value=0.0,
+        value=250_000.0,
+        step=1000.0,
+        help="Cost of the item or property (often similar to loan amount).",
+    )
+    contract_label = st.sidebar.selectbox("Loan type", ["Fixed-term loan", "Revolving credit line"], index=0)
+    contract = "Cash loans" if contract_label == "Fixed-term loan" else "Revolving loans"
 
-    st.sidebar.markdown("### Personal Details")
-    age_years = st.sidebar.slider("Age (years)", 18, 70, 35)
-    years_employed = st.sidebar.slider("Years employed", 0, 40, 5)
-    gender = st.sidebar.selectbox("Gender", ["M", "F"], index=0)
-    own_car = st.sidebar.selectbox("Owns car", ["Y", "N"], index=0)
-    own_realty = st.sidebar.selectbox("Owns realty", ["Y", "N"], index=0)
-    children = st.sidebar.slider("Number of children", 0, 10, 0)
+    st.sidebar.markdown("### About them")
+    age_years = st.sidebar.slider("Age", 18, 70, 35)
+    years_employed = st.sidebar.slider("Years at current job", 0, 40, 5)
+    gender = "M" if st.sidebar.selectbox("Gender", ["Male", "Female"], index=0) == "Male" else "F"
+    own_car = "Y" if st.sidebar.selectbox("Owns a car?", ["Yes", "No"], index=0) == "Yes" else "N"
+    own_realty = "Y" if st.sidebar.selectbox("Owns a home?", ["Yes", "No"], index=0) == "Yes" else "N"
+    children = st.sidebar.slider("Children", 0, 10, 0)
 
-    st.sidebar.markdown("### Credit History")
-    bureau_count = st.sidebar.slider("Bureau record count", 0, 50, 3)
-    bureau_max_overdue = st.sidebar.slider("Bureau max days overdue", 0, 120, 0)
+    st.sidebar.markdown("### Past credit")
+    bureau_count = st.sidebar.slider(
+        "How many past loans on their credit file?",
+        0,
+        50,
+        3,
+        help="More records can help or hurt depending on payment history.",
+    )
+    bureau_max_overdue = st.sidebar.slider(
+        "Worst late payment (days)",
+        0,
+        120,
+        0,
+        help="Longest they were overdue on any past loan. 0 = always on time.",
+    )
 
     # ──────────────────────────────────────────────────────────────────────────
     # SCORING
@@ -389,26 +475,43 @@ def main() -> None:
     raw["EXT_SOURCE_1"] = float(ext1)
 
     X = preprocess_for_model(raw, feature_cols)
+    xgb_columns = _model_feature_names(xgb)
+    X_model = _align_to_model(X, xgb_columns)
+    if xgb_columns != feature_cols:
+        extra = set(feature_cols) - set(xgb_columns)
+        missing = set(xgb_columns) - set(feature_cols)
+        if extra or missing:
+            st.sidebar.warning(
+                "The saved model is slightly older than the latest code. "
+                "Scores still work; retrain with `python src/train.py` for the newest version."
+            )
 
-    p_default = float(xgb.predict_proba(X)[0, 1])
+    p_default = float(xgb.predict_proba(X_model)[0, 1])
     model_score = max(0, min(100, int(round((1.0 - p_default) * 100))))
     risk_score, triggered_rules = apply_guardrails(model_score, X)
 
     if risk_score >= 70:
-        tier, bg_color, text_color = "Low Risk", "#d4edda", "#1a7f37"
+        tier, tier_blurb = "Looks good", "Likely to repay if other checks pass."
+        bg_color, text_color = "#d4edda", "#1a7f37"
     elif risk_score >= 40:
-        tier, bg_color, text_color = "Medium Risk", "#fff3cd", "#856404"
+        tier, tier_blurb = "Needs review", "Some red flags — worth a closer look."
+        bg_color, text_color = "#fff3cd", "#856404"
     else:
-        tier, bg_color, text_color = "High Risk", "#f8d7da", "#842029"
+        tier, tier_blurb = "High risk", "Strong signs they may miss payments."
+        bg_color, text_color = "#f8d7da", "#842029"
+    repay_pct = (1.0 - p_default) * 100.0
 
     # Compute SHAP once; reuse for both the factor panel and the waterfall chart
-    shap_vals, shap_base = _compute_shap(X)
+    shap_vals, shap_base = _compute_shap(X_model)
 
     # ──────────────────────────────────────────────────────────────────────────
     # HEADER
     # ──────────────────────────────────────────────────────────────────────────
-    st.title("Credit Risk Assessment")
-    st.caption("Adjust the applicant's details in the sidebar — the score and explanation update instantly.")
+    st.title("Will this applicant pay the loan back?")
+    st.markdown(
+        f"**Safety score: {risk_score}/100** — {tier_blurb} "
+        f"The model estimates about **{repay_pct:.0f}%** chance of paying on time."
+    )
     st.divider()
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -427,7 +530,7 @@ def main() -> None:
                 text-align: center;
             ">
                 <div style="font-size:0.9rem;color:#555;margin-bottom:4px;letter-spacing:0.05em;">
-                    RISK SCORE
+                    SAFETY SCORE
                 </div>
                 <div style="font-size:4rem;font-weight:800;color:{text_color};line-height:1;">
                     {risk_score}
@@ -452,47 +555,22 @@ def main() -> None:
         st.progress(risk_score / 100.0)
         if model_score != risk_score:
             st.caption(
-                f"Model score: **{model_score}** → Policy-adjusted: **{risk_score}** "
-                f"(default probability: {p_default * 100:.1f}%)"
+                f"Before company rules: **{model_score}**. After rules: **{risk_score}**. "
+                f"Estimated miss-payment chance: **{p_default * 100:.0f}%**."
             )
         else:
-            st.caption(
-                f"Default probability: **{p_default * 100:.1f}%** "
-                f"({'likely to repay' if p_default < 0.5 else 'likely to default'})"
-            )
+            st.caption(f"Estimated miss-payment chance: **{p_default * 100:.0f}%**.")
 
     with drivers_col:
-        st.markdown("#### What's driving this score?")
-        st.caption(
-            "Positive factors reduce risk (push score up). "
-            "Negative factors increase risk (push score down)."
-        )
+        st.markdown("#### What helped or hurt?")
+        st.caption("Based on the same machine-learning model — updated every time you move a slider.")
 
-        # Build a ranked factor table from SHAP values.
-        # Positive SHAP → pushes toward default → LOWERS the risk score.
-        # We flip the sign so positive = good for the applicant.
-        feature_names = list(X.columns)
+        feature_names = list(X_model.columns)
         factor_df = pd.DataFrame({
             "Feature": feature_names,
-            "Impact": -shap_vals,   # flipped: positive = reduces risk
+            "Impact": -shap_vals,
         })
-
-        # Friendly display names for the most common features
-        label_map = {
-            "EXT_SOURCE_1": "External credit score 1",
-            "EXT_SOURCE_2": "External credit score 2",
-            "EXT_SOURCE_3": "External credit score 3",
-            "CREDIT_INCOME_RATIO": "Loan-to-income ratio",
-            "ANNUITY_INCOME_RATIO": "Repayment burden",
-            "AGE_YEARS": "Age",
-            "YEARS_EMPLOYED": "Years employed",
-            "AMT_CREDIT": "Loan amount",
-            "AMT_INCOME_TOTAL": "Annual income",
-            "bureau_max_overdue": "Worst overdue days",
-            "bureau_count": "Bureau record count",
-            "CREDIT_TERM": "Loan term (months)",
-        }
-        factor_df["Label"] = factor_df["Feature"].map(label_map).fillna(factor_df["Feature"])
+        factor_df["Label"] = factor_df["Feature"].apply(_feature_label)
         factor_df = factor_df.sort_values("Impact", ascending=False)
 
         top_positive = factor_df[factor_df["Impact"] > 0].head(4)
@@ -500,9 +578,9 @@ def main() -> None:
 
         left_f, right_f = st.columns(2)
         with left_f:
-            st.markdown("**Reducing risk (good)**")
+            st.markdown("**Helped the score**")
             if top_positive.empty:
-                st.caption("None significant")
+                st.caption("Nothing stood out on the positive side.")
             for _, row in top_positive.iterrows():
                 bar_pct = min(int(abs(row["Impact"]) * 600), 100)
                 st.markdown(
@@ -515,9 +593,9 @@ def main() -> None:
                 )
 
         with right_f:
-            st.markdown("**Increasing risk (concern)**")
+            st.markdown("**Hurt the score**")
             if top_negative.empty:
-                st.caption("None significant")
+                st.caption("Nothing stood out on the negative side.")
             for _, row in top_negative.iterrows():
                 bar_pct = min(int(abs(row["Impact"]) * 600), 100)
                 st.markdown(
@@ -532,28 +610,22 @@ def main() -> None:
     st.divider()
 
     if triggered_rules:
-        st.warning(
-            "**Policy rules triggered:**\n" + "\n".join(f"- {r}" for r in triggered_rules)
-        )
+        st.markdown("#### Company policy overrides")
+        st.caption("Hard limits applied on top of the model score (like internal lending rules).")
+        for rule in triggered_rules:
+            st.info(rule)
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # ROW 2: SHAP waterfall (full detail explanation)
-    # ──────────────────────────────────────────────────────────────────────────
-    st.markdown("#### Full explanation — how the model built this score")
-    st.caption(
-        "Each bar shows one feature's contribution. "
-        "Red bars push toward default (lower score); blue bars push toward repayment (higher score)."
-    )
-    wf_fig = _waterfall_figure(X, shap_vals, shap_base)
-    st.pyplot(wf_fig, clear_figure=True)
-    plt.close(wf_fig)
+    with st.expander("Detailed chart (for analysts)", expanded=False):
+        st.caption(
+            "Each bar is one factor. Red = pushes toward missing payments. Blue = pushes toward paying on time."
+        )
+        wf_fig = _waterfall_figure(X_model, shap_vals, shap_base)
+        st.pyplot(wf_fig, clear_figure=True)
+        plt.close(wf_fig)
 
     st.divider()
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # ROW 3: Model comparison + global SHAP (collapsed by default)
-    # ──────────────────────────────────────────────────────────────────────────
-    with st.expander("Model comparison — holdout metrics", expanded=False):
+    with st.expander("How accurate is the model? (test data)", expanded=False):
         display_metrics = metrics_df.drop(columns=["confusion_matrix"], errors="ignore")
         numeric_cols = display_metrics.select_dtypes(include=[np.number]).columns
         formatted = display_metrics.copy()
@@ -561,12 +633,13 @@ def main() -> None:
             formatted[c] = formatted[c].map(lambda v: f"{float(v):.4f}")
         st.dataframe(formatted, hide_index=True, use_container_width=True)
 
-    with st.expander("Global feature importance (across all training applicants)", expanded=False):
+    with st.expander("What mattered most when the model was trained?", expanded=False):
         summary_path = _ROOT / "outputs" / "shap_summary.png"
         if summary_path.is_file():
+            st.caption("Overview across ~300k past applicants — not just this person.")
             st.image(str(summary_path), use_container_width=True)
         else:
-            st.warning("Run `python src/explain.py` to generate outputs/shap_summary.png.")
+            st.warning("Run `python src/explain.py` to generate the training summary chart.")
 
 
 if __name__ == "__main__":
