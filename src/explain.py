@@ -34,37 +34,7 @@ import pandas as pd
 import shap
 
 from src.data_prep import load_dataset
-
-
-def _coerce_shap_matrix(raw: object, expected_shape: tuple[int, int]) -> np.ndarray:
-    """
-    Normalise the raw SHAP output into a consistent numerical matrix.
-
-    Different versions of the SHAP library and different model configurations
-    can return SHAP values in slightly different formats (a single matrix,
-    or a list of two matrices — one per class). This helper function handles
-    both cases and always returns the contributions toward the default class
-    (class 1 = defaulted), which is what we care about for risk scoring.
-
-    In plain terms: it ensures the SHAP output is always a clean, consistently
-    shaped table with one row per applicant and one column per feature.
-    """
-    if isinstance(raw, list):
-        # The library returned two sets of values (one for each class).
-        # We keep only the contributions toward the default class (index 1).
-        if len(raw) < 2:
-            raise ValueError("Unexpected SHAP list length for binary classification.")
-        arr = np.asarray(raw[1])
-    else:
-        arr = np.asarray(raw)
-
-    # Handle an alternative 3-dimensional format: keep the default-class slice
-    if arr.ndim == 3 and arr.shape[-1] == 2:
-        arr = arr[:, :, 1]
-
-    if arr.shape != expected_shape:
-        raise ValueError(f"SHAP values shape {arr.shape} does not match X {expected_shape}.")
-    return arr
+from src.shap_utils import coerce_shap_matrix, expected_value_scalar
 
 
 def compute_shap_values(model, X: pd.DataFrame) -> tuple[np.ndarray, shap.TreeExplainer]:
@@ -87,7 +57,7 @@ def compute_shap_values(model, X: pd.DataFrame) -> tuple[np.ndarray, shap.TreeEx
     raw = explainer.shap_values(X)
 
     # Normalise the output format regardless of how the library returned it
-    matrix = _coerce_shap_matrix(raw, (X.shape[0], X.shape[1]))
+    matrix = coerce_shap_matrix(raw, (X.shape[0], X.shape[1]))
     return matrix, explainer
 
 
@@ -123,25 +93,6 @@ def plot_shap_summary(
     plt.close("all")
 
 
-def _expected_value_scalar(explainer: shap.TreeExplainer) -> float:
-    """
-    Extract the model's baseline prediction (the starting point before any features are considered).
-
-    Every SHAP chart starts from a baseline value — the model's average predicted
-    default probability across the training data. Each feature's SHAP value is then
-    an adjustment up or down from this baseline.
-
-    This helper handles the case where the explainer returns two baseline values
-    (one per class) and picks the one corresponding to the default class.
-    """
-    ev = explainer.expected_value
-    ev_arr = np.asarray(ev).ravel()
-    if ev_arr.size > 1:
-        # Binary model: pick the baseline for the default class (index 1)
-        return float(ev_arr[1])
-    return float(ev_arr[0])
-
-
 def plot_shap_waterfall(
     explainer: shap.TreeExplainer,
     X: pd.DataFrame,
@@ -173,10 +124,10 @@ def plot_shap_waterfall(
 
     # Calculate SHAP values specifically for this one applicant
     raw = explainer.shap_values(row_df)
-    vals = _coerce_shap_matrix(raw, (1, X.shape[1]))[0]
+    vals = coerce_shap_matrix(raw, (1, X.shape[1]))[0]
 
     # Get the baseline (average) prediction to start the waterfall from
-    base = _expected_value_scalar(explainer)
+    base = expected_value_scalar(explainer)
 
     # Package everything into the format SHAP's waterfall chart expects
     explanation = shap.Explanation(

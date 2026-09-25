@@ -5,7 +5,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app import apply_guardrails
+from src.guardrails import apply_guardrails
 
 
 def _make_X(

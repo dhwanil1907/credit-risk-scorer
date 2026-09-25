@@ -33,6 +33,8 @@ import shap
 import streamlit as st
 
 from src.data_prep import encode_categoricals, engineer_features
+from src.guardrails import apply_guardrails
+from src.shap_utils import coerce_shap_matrix, expected_value_scalar
 
 # Internal column names → plain labels shown in the UI
 FEATURE_LABELS: dict[str, str] = {
@@ -63,46 +65,6 @@ FEATURE_LABELS: dict[str, str] = {
 
 def _feature_label(column: str) -> str:
     return FEATURE_LABELS.get(column, column.replace("_", " ").title())
-
-
-def _coerce_shap_matrix(raw: object, expected_shape: tuple[int, int]) -> np.ndarray:
-    """
-    Normalise the SHAP library's output into a consistent matrix format.
-
-    The SHAP library can return values in slightly different formats depending
-    on the version and model type. This function handles those variations and
-    always returns a clean table: one row per applicant, one column per feature,
-    containing contributions toward the default class (the one we care about).
-
-    This is identical to the same helper in src/explain.py — duplicated here
-    so the web app does not depend on the explain module at runtime.
-    """
-    if isinstance(raw, list):
-        if len(raw) < 2:
-            raise ValueError("Unexpected SHAP list length for binary classification.")
-        arr = np.asarray(raw[1])
-    else:
-        arr = np.asarray(raw)
-    if arr.ndim == 3 and arr.shape[-1] == 2:
-        arr = arr[:, :, 1]
-    if arr.shape != expected_shape:
-        raise ValueError(f"SHAP values shape {arr.shape} does not match X {expected_shape}.")
-    return arr
-
-
-def _expected_value_scalar(explainer: shap.TreeExplainer) -> float:
-    """
-    Get the model's single baseline value to anchor the waterfall chart.
-
-    The baseline is the model's average predicted default probability across
-    all training applicants — the starting point before any individual features
-    are taken into account. When a binary model returns two baseline values
-    (one per class), we pick the one for the default class (index 1).
-    """
-    ev_arr = np.asarray(explainer.expected_value).ravel()
-    if ev_arr.size > 1:
-        return float(ev_arr[1])
-    return float(ev_arr[0])
 
 
 @st.cache_resource
@@ -147,8 +109,8 @@ def _compute_shap(X_row: pd.DataFrame) -> tuple[np.ndarray, float]:
     """
     explainer = xgb_shap_explainer()
     raw = explainer.shap_values(X_row)
-    shap_matrix = _coerce_shap_matrix(raw, (X_row.shape[0], X_row.shape[1]))
-    return shap_matrix[0], _expected_value_scalar(explainer)
+    shap_matrix = coerce_shap_matrix(raw, (X_row.shape[0], X_row.shape[1]))
+    return shap_matrix[0], expected_value_scalar(explainer)
 
 
 def _waterfall_figure(X_row: pd.DataFrame, vals: np.ndarray, base: float) -> plt.Figure:
@@ -321,63 +283,6 @@ def _model_feature_names(model: object) -> list[str]:
 def _align_to_model(X: pd.DataFrame, model_columns: list[str]) -> pd.DataFrame:
     """Drop or zero-fill columns so X matches what the saved estimator expects."""
     return X.reindex(columns=model_columns, fill_value=0.0).astype(np.float64)
-
-
-def apply_guardrails(model_score: int, X_row: pd.DataFrame) -> tuple[int, list[str]]:
-    """
-    Apply business rule overrides on top of the model score.
-
-    In production credit systems, a statistical model sits underneath a policy
-    rules engine that enforces hard limits mandated by risk teams or regulators.
-    Rules are evaluated in order. The harshest cap wins.
-
-    Returns:
-        adjusted_score: the final score after all rules are applied
-        triggered: list of human-readable descriptions of rules that fired
-    """
-    score = model_score
-    triggered: list[str] = []
-
-    annuity_ratio = (
-        float(X_row["ANNUITY_INCOME_RATIO"].iloc[0])
-        if "ANNUITY_INCOME_RATIO" in X_row.columns
-        else 0.0
-    )
-    credit_ratio = (
-        float(X_row["CREDIT_INCOME_RATIO"].iloc[0]) if "CREDIT_INCOME_RATIO" in X_row.columns else 0.0
-    )
-    max_overdue = (
-        float(X_row["bureau_max_overdue"].iloc[0]) if "bureau_max_overdue" in X_row.columns else 0.0
-    )
-
-    if annuity_ratio > 1.0:
-        if score > 30:
-            score = 30
-        triggered.append(
-            f"Yearly loan payments are more than their annual income "
-            f"({annuity_ratio:.1f}× income) — score capped at 30"
-        )
-    elif annuity_ratio > 0.5:
-        if score > 55:
-            score = 55
-        triggered.append(
-            f"Loan payments take over 50% of income ({annuity_ratio:.0%} of income) — score capped at 55"
-        )
-
-    if credit_ratio > 10.0:
-        if score > 45:
-            score = 45
-        triggered.append(
-            f"Loan is {credit_ratio:.1f}× annual income — too large — score capped at 45"
-        )
-
-    if max_overdue > 60:
-        score = max(0, score - 15)
-        triggered.append(
-            f"Credit file shows {int(max_overdue)} days overdue on a past loan — score reduced by 15"
-        )
-
-    return score, triggered
 
 
 def main() -> None:
