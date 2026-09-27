@@ -1,116 +1,30 @@
 """
-Streamlit front-end: applicant inputs → same encoding/engineering as training, XGBoost risk score,
-local SHAP waterfall, and static model / global-SHAP artifacts from the training run.
-
-This is the interactive web application that a loan officer or analyst sees in their browser.
-It lets the user enter an applicant's details in a sidebar, and instantly shows:
-- A risk score from 0–100 (higher = safer)
-- A colour-coded risk tier (Low / Medium / High Risk)
-- A personalised SHAP chart explaining why the model gave that score
-- A comparison table of all three model's performance metrics
-- The global SHAP summary chart from the training run
+Streamlit front-end. Scoring goes through the API (`SCORER_API_URL`, default
+http://127.0.0.1:8000) so the dashboard and the service share one model path.
 """
 from __future__ import annotations
 
-import json
-import sys
+import os
 from pathlib import Path
 
-# Repo root (this file lives at project root next to `src/` and `models/`).
-_ROOT = Path(__file__).resolve().parent
-if str(_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ROOT))
-
-import joblib
 import matplotlib
 
-# Use a non-interactive chart backend so matplotlib can save images without opening windows
 matplotlib.use("Agg")
+import httpx
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import shap
 import streamlit as st
 
-from src.data_prep import encode_categoricals, engineer_features
-from src.guardrails import apply_guardrails
-from src.shap_utils import coerce_shap_matrix, expected_value_scalar
+_ROOT = Path(__file__).resolve().parent
+API_URL = os.environ.get("SCORER_API_URL", "http://127.0.0.1:8000").rstrip("/")
 
-# Internal column names → plain labels shown in the UI
-FEATURE_LABELS: dict[str, str] = {
-    "EXT_SOURCE_1": "Credit bureau score #1",
-    "EXT_SOURCE_2": "Credit bureau score #2",
-    "EXT_SOURCE_3": "Credit bureau score #3",
-    "EXT_MEAN": "Average credit bureau score",
-    "CREDIT_INCOME_RATIO": "Loan size vs. income",
-    "ANNUITY_INCOME_RATIO": "Yearly payments vs. income",
-    "DEBT_STRESS": "Overall debt pressure",
-    "EXT_MEAN_X_ANNUITY_RATIO": "Credit score × payment burden",
-    "EXT_MEAN_X_CREDIT_RATIO": "Credit score × loan size",
-    "AGE_YEARS": "Age",
-    "YEARS_EMPLOYED": "Years at current job",
-    "AMT_CREDIT": "Loan amount",
-    "AMT_INCOME_TOTAL": "Annual income",
-    "AMT_ANNUITY": "Yearly loan payment",
-    "AMT_GOODS_PRICE": "Price of what they are buying",
-    "CREDIT_TERM": "Loan length (months)",
-    "bureau_max_overdue": "Worst late-payment streak (days)",
-    "bureau_count": "Past loans on credit file",
-    "bureau_total_debt": "Total existing debt",
-    "CODE_GENDER": "Gender",
-    "NAME_CONTRACT_TYPE": "Loan type",
-    "CNT_CHILDREN": "Number of children",
+_BANDS = {
+    "Looks good": ("Likely to repay if other checks pass.", "#d4edda", "#1a7f37"),
+    "Needs review": ("Some red flags — worth a closer look.", "#fff3cd", "#856404"),
+    "High risk": ("Strong signs they may miss payments.", "#f8d7da", "#842029"),
 }
-
-
-def _feature_label(column: str) -> str:
-    return FEATURE_LABELS.get(column, column.replace("_", " ").title())
-
-
-@st.cache_resource
-def load_models() -> dict[str, object]:
-    """
-    Load all three trained model files from disk into memory.
-
-    This function is cached — Streamlit will only load the models once when the
-    app first starts, then reuse them for every subsequent interaction. This
-    keeps the app responsive; loading large model files on every click would
-    make the app feel slow.
-
-    Returns a dictionary with model names as keys and fitted model objects as values.
-    """
-    return {
-        "xgboost": joblib.load(_ROOT / "models" / "xgboost.pkl"),
-        "random_forest": joblib.load(_ROOT / "models" / "random_forest.pkl"),
-        "logistic_regression": joblib.load(_ROOT / "models" / "logistic_regression.pkl"),
-    }
-
-
-@st.cache_resource
-def xgb_shap_explainer() -> shap.TreeExplainer:
-    """
-    Load and cache the SHAP explainer for the XGBoost model.
-
-    The SHAP explainer analyses the internal structure of the XGBoost model's
-    decision trees. Building this explainer is computationally expensive, so
-    we cache it so it is only built once per server session — not on every
-    applicant update.
-    """
-    # TreeExplainer is expensive to construct; cache once per Streamlit server process
-    return shap.TreeExplainer(load_models()["xgboost"])
-
-
-def _compute_shap(X_row: pd.DataFrame) -> tuple[np.ndarray, float]:
-    """
-    Return (shap_values_1d, base_value) for a single-row DataFrame.
-
-    shap_values_1d[i] > 0 means feature i pushes toward default (increases risk).
-    shap_values_1d[i] < 0 means feature i pushes toward repayment (decreases risk).
-    """
-    explainer = xgb_shap_explainer()
-    raw = explainer.shap_values(X_row)
-    shap_matrix = coerce_shap_matrix(raw, (X_row.shape[0], X_row.shape[1]))
-    return shap_matrix[0], expected_value_scalar(explainer)
 
 
 def _waterfall_figure(X_row: pd.DataFrame, vals: np.ndarray, base: float) -> plt.Figure:
@@ -134,24 +48,6 @@ def _waterfall_figure(X_row: pd.DataFrame, vals: np.ndarray, base: float) -> plt
 
 
 @st.cache_data
-def load_feature_cols() -> list[str]:
-    """
-    Load the saved list of feature column names used during training.
-
-    When the model was trained, the exact list of columns (and their order)
-    was saved to outputs/feature_cols.json. We load that same list here to
-    guarantee the web app sends the model data in the exact same column order
-    it was trained on. Using the wrong column order would produce nonsensical
-    predictions.
-
-    Cached so the file is only read from disk once per session.
-    """
-    path = _ROOT / "outputs" / "feature_cols.json"
-    with open(path, encoding="utf-8") as f:
-        return json.load(f)
-
-
-@st.cache_data
 def load_metrics_csv() -> pd.DataFrame:
     """
     Load the model performance comparison table saved by train.py.
@@ -164,125 +60,14 @@ def load_metrics_csv() -> pd.DataFrame:
     return pd.read_csv(_ROOT / "outputs" / "metrics.csv")
 
 
-def _build_raw_applicant_frame(
-    contract: str,
-    gender: str,
-    own_car: str,
-    own_realty: str,
-    children: int,
-    income: float,
-    loan: float,
-    annuity: float,
-    goods_price: float,
-    age_years: int,
-    years_employed: int,
-    ext2: float,
-    ext3: float,
-    bureau_count: int,
-    bureau_max_overdue: int,
-) -> pd.DataFrame:
-    """
-    Convert the values entered in the sidebar into a single-row table the model can read.
-
-    The model was trained on a specific table format with dozens of columns.
-    This function takes the user's inputs from the sidebar and builds a row in
-    that exact format — filling in sensible neutral defaults for any fields not
-    collected in the sidebar (e.g. regional rating is set to the average of 2).
-
-    Notes on defaults:
-    - Fields not shown in the sidebar use neutral/average values so they don't
-      skew the prediction in either direction
-    - Bureau fields not collected (e.g. total debt) default to 0, which is the
-      same value applicants with no bureau records receive during training
-    - The model uses days for age and employment (negative numbers mean "in the
-      past"), so we convert from years back to days internally
-    """
-    # Convert years employed to negative days (the format used in training data)
-    # If years_employed is 0, use -30 days as a safe non-zero placeholder
-    days_employed = -int(years_employed * 365) if years_employed > 0 else -30
-
-    return pd.DataFrame(
-        [
-            {
-                "NAME_CONTRACT_TYPE": contract,          # "Cash loans" or "Revolving loans"
-                "CODE_GENDER": gender,                   # "M" or "F"
-                "FLAG_OWN_CAR": own_car,                 # "Y" or "N"
-                "FLAG_OWN_REALTY": own_realty,           # "Y" or "N"
-                "CNT_CHILDREN": int(children),
-                # Family size = children + 1 parent (minimum 2, since applicant counts as 1)
-                "CNT_FAM_MEMBERS": max(int(children) + 1, 2),
-                "AMT_INCOME_TOTAL": float(income),
-                "AMT_CREDIT": float(loan),
-                "AMT_ANNUITY": float(annuity),
-                "AMT_GOODS_PRICE": float(goods_price),
-                "DAYS_BIRTH": -int(age_years * 365),     # Negative: days before the application
-                "DAYS_EMPLOYED": days_employed,           # Negative: days before the application
-                "EXT_SOURCE_1": 0.5,                     # External credit score 1 — neutral default
-                "EXT_SOURCE_2": float(ext2),             # External credit score 2 — from sidebar
-                "EXT_SOURCE_3": float(ext3),             # External credit score 3 — from sidebar
-                "REGION_POPULATION_RELATIVE": 0.02,      # Regional density — neutral default
-                "DAYS_ID_PUBLISH": -4000,                # Days since ID was updated — neutral default
-                "OWN_CAR_AGE": 5.0 if own_car == "Y" else 0.0,  # Car age: 5 years if they own one
-                "REGION_RATING_CLIENT": 2,               # Region quality rating — neutral default (1–3 scale)
-                "REGION_RATING_CLIENT_W_CITY": 2,        # City-weighted region rating — neutral default
-                "bureau_count": int(bureau_count),       # Number of prior credit records — from sidebar
-                "bureau_active_count": 0,                # Active credit lines — defaulted to 0
-                "bureau_max_overdue": int(bureau_max_overdue),  # Worst overdue days — from sidebar
-                "bureau_total_debt": 0.0,                # Total outstanding debt — defaulted to 0
-                "bureau_avg_credit": 0.0,                # Average credit line size — defaulted to 0
-            }
-        ]
-    )
-
-
-def preprocess_for_model(raw_df: pd.DataFrame, feature_cols: list[str]) -> pd.DataFrame:
-    """
-    Apply the same data transformations to sidebar inputs as were applied during training.
-
-    Consistency is critical: the model was trained on data that had been through
-    specific steps (text → numbers, calculated ratios, etc.). If we send the model
-    raw sidebar values without those same steps, it will interpret the numbers
-    incorrectly and produce wrong predictions.
-
-    Steps applied here:
-    1. encode_categoricals: convert text like "M"/"F" to 1/0
-    2. engineer_features: add calculated columns like "loan as % of income"
-    3. Fill any missing columns with 0 (for optional features not collected in the sidebar)
-    4. Select and reorder columns to exactly match what the model was trained on
-    """
-    # Convert text fields to numbers (same mappings as training)
-    df = encode_categoricals(raw_df)
-
-    # Add the derived/calculated columns (same formulas as training)
-    df = engineer_features(df)
-
-    # Any feature column that couldn't be produced from sidebar inputs gets set to 0
-    # (same default as applicants with no data for that feature in training)
-    for col in feature_cols:
-        if col not in df.columns:
-            df[col] = 0.0
-
-    # Select only the columns the model knows about, in the exact same order as training
-    out = df[feature_cols].astype(np.float64)
-    return out
-
-
-def _model_feature_names(model: object) -> list[str]:
-    """Column order stored in the fitted estimator (may differ from feature_cols.json)."""
-    names_in = getattr(model, "feature_names_in_", None)
-    if names_in is not None:
-        return [str(c) for c in names_in]
-    get_booster = getattr(model, "get_booster", None)
-    if get_booster is not None:
-        names = get_booster().feature_names
-        if names:
-            return [str(c) for c in names]
-    raise ValueError("Could not read feature names from the loaded model.")
-
-
-def _align_to_model(X: pd.DataFrame, model_columns: list[str]) -> pd.DataFrame:
-    """Drop or zero-fill columns so X matches what the saved estimator expects."""
-    return X.reindex(columns=model_columns, fill_value=0.0).astype(np.float64)
+def _score_applicant(payload: dict[str, object]) -> dict[str, object]:
+    """POST one applicant to the scoring API. Raises httpx.HTTPError on failure."""
+    response = httpx.post(f"{API_URL}/predict", json=payload, timeout=30.0)
+    response.raise_for_status()
+    body = response.json()
+    if not isinstance(body, dict):
+        raise httpx.HTTPError("Scoring API returned a non-object response.")
+    return body
 
 
 def main() -> None:
@@ -294,12 +79,6 @@ def main() -> None:
     with every change.
     """
     st.set_page_config(page_title="Loan Risk Checker", layout="wide", page_icon="📋")
-
-    # Load all resources (cached — only happens once per server session)
-    models = load_models()
-    xgb = models["xgboost"]
-    _ = xgb_shap_explainer()       # Pre-warm the cache so first prediction is fast
-    feature_cols = load_feature_cols()
     metrics_df = load_metrics_csv()
 
     st.sidebar.title("Loan applicant")
@@ -370,44 +149,47 @@ def main() -> None:
     # ──────────────────────────────────────────────────────────────────────────
     # SCORING
     # ──────────────────────────────────────────────────────────────────────────
-    raw = _build_raw_applicant_frame(
-        contract, gender, own_car, own_realty, children,
-        income, loan, annuity, goods_price,
-        age_years, years_employed,
-        ext2, ext3, bureau_count, bureau_max_overdue,
-    )
-    # Override EXT_SOURCE_1 with the sidebar value (was previously hardcoded to 0.5)
-    raw["EXT_SOURCE_1"] = float(ext1)
+    payload = {
+        "yearly_income": float(income),
+        "loan_amount": float(loan),
+        "yearly_payment": float(annuity),
+        "purchase_price": float(goods_price),
+        "age": int(age_years),
+        "years_employed": int(years_employed),
+        "bureau_score_1": float(ext1),
+        "bureau_score_2": float(ext2),
+        "bureau_score_3": float(ext3),
+        "children": int(children),
+        "owns_car": own_car == "Y",
+        "owns_home": own_realty == "Y",
+        "gender": gender,
+        "loan_type": "cash" if contract == "Cash loans" else "revolving",
+        "past_loans": int(bureau_count),
+        "worst_late_days": int(bureau_max_overdue),
+    }
+    try:
+        scored = _score_applicant(payload)
+    except httpx.HTTPError:
+        st.error(
+            f"Could not reach the scoring service at {API_URL}. "
+            "Start it with `uvicorn api:app --host 127.0.0.1 --port 8000`."
+        )
+        st.stop()
 
-    X = preprocess_for_model(raw, feature_cols)
-    xgb_columns = _model_feature_names(xgb)
-    X_model = _align_to_model(X, xgb_columns)
-    if xgb_columns != feature_cols:
-        extra = set(feature_cols) - set(xgb_columns)
-        missing = set(xgb_columns) - set(feature_cols)
-        if extra or missing:
-            st.sidebar.warning(
-                "The saved model is slightly older than the latest code. "
-                "Scores still work; retrain with `python src/train.py` for the newest version."
-            )
-
-    p_default = float(xgb.predict_proba(X_model)[0, 1])
-    model_score = max(0, min(100, int(round((1.0 - p_default) * 100))))
-    risk_score, triggered_rules = apply_guardrails(model_score, X)
-
-    if risk_score >= 70:
-        tier, tier_blurb = "Looks good", "Likely to repay if other checks pass."
-        bg_color, text_color = "#d4edda", "#1a7f37"
-    elif risk_score >= 40:
-        tier, tier_blurb = "Needs review", "Some red flags — worth a closer look."
-        bg_color, text_color = "#fff3cd", "#856404"
-    else:
-        tier, tier_blurb = "High risk", "Strong signs they may miss payments."
-        bg_color, text_color = "#f8d7da", "#842029"
+    risk_score = int(scored["score"])
+    model_score = int(scored["model_score"])
+    tier = str(scored["band"])
+    tier_blurb, bg_color, text_color = _BANDS.get(tier, _BANDS["Needs review"])
+    p_default = float(scored["default_probability"])
     repay_pct = (1.0 - p_default) * 100.0
-
-    # Compute SHAP once; reuse for both the factor panel and the waterfall chart
-    shap_vals, shap_base = _compute_shap(X_model)
+    triggered_rules = list(scored["rules_applied"])
+    contributions = pd.DataFrame(scored["contributions"])
+    shap_vals = contributions["shap"].to_numpy(dtype=float)
+    shap_base = float(scored["shap_base"])
+    X_model = pd.DataFrame(
+        [contributions["value"].tolist()],
+        columns=contributions["feature"].tolist(),
+    )
 
     # ──────────────────────────────────────────────────────────────────────────
     # HEADER
@@ -470,12 +252,11 @@ def main() -> None:
         st.markdown("#### What helped or hurt?")
         st.caption("Based on the same machine-learning model — updated every time you move a slider.")
 
-        feature_names = list(X_model.columns)
         factor_df = pd.DataFrame({
-            "Feature": feature_names,
+            "Feature": contributions["feature"],
+            "Label": contributions["label"],
             "Impact": -shap_vals,
         })
-        factor_df["Label"] = factor_df["Feature"].apply(_feature_label)
         factor_df = factor_df.sort_values("Impact", ascending=False)
 
         top_positive = factor_df[factor_df["Impact"] > 0].head(4)
@@ -536,13 +317,13 @@ def main() -> None:
         formatted = display_metrics.copy()
         for c in numeric_cols:
             formatted[c] = formatted[c].map(lambda v: f"{float(v):.4f}")
-        st.dataframe(formatted, hide_index=True, use_container_width=True)
+        st.dataframe(formatted, hide_index=True, width="stretch")
 
     with st.expander("What mattered most when the model was trained?", expanded=False):
         summary_path = _ROOT / "outputs" / "shap_summary.png"
         if summary_path.is_file():
             st.caption("Overview across ~300k past applicants — not just this person.")
-            st.image(str(summary_path), use_container_width=True)
+            st.image(str(summary_path), width="stretch")
         else:
             st.warning("Run `python src/explain.py` to generate the training summary chart.")
 

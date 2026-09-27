@@ -1,0 +1,11 @@
+line-length = 100
+
+[lint]
+select = ["E", "F", "I"]
+ignore = ["E501"]
+
+[lint.per-file-ignores]
+"api.py" = ["E402"]
+"app.py" = ["E402"]
+"src/explain.py" = ["E402"]
+"src/train.py" = ["E402"]

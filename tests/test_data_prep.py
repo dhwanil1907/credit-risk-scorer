@@ -10,7 +10,6 @@
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from src.data_prep import (
     clean_application,
@@ -20,7 +19,6 @@ from src.data_prep import (
     load_previous_application_aggregates,
     split_data,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fake data builders

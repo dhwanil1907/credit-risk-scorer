@@ -38,56 +38,28 @@ service. The model is done (XGBoost, 0.778 ROC-AUC); this phase is all infrastru
 `POST /predict` returns risk score, risk band, business-rule caps applied, and the top 3 SHAP
 reasons for that applicant.
 
-- [ ] Pydantic request model with validation and sensible error messages on bad input
-- [ ] Response: `{score, band, rules_applied[], top_reasons[3]}`
-- [ ] SHAP reasons use the plain-English labels already in `app.py`'s `FEATURE_LABELS`
-- [ ] `GET /health` for load balancer checks
-- [ ] Build the `TreeExplainer` once at startup, not per request — it is expensive and will
-      dominate p95 latency otherwise
-- [ ] API tests: valid request, malformed payload, out-of-range values, missing fields
+- [x] Pydantic request model with validation and sensible error messages on bad input
+- [x] Response: `{score, band, rules_applied[], top_reasons[3]}`
+- [x] SHAP reasons use the plain-English labels in `src/labels.py`
+- [x] `GET /health` for load balancer checks
+- [x] `Scorer` builds the `TreeExplainer` once at startup
+- [x] API tests: valid request, malformed payload, out-of-range values, missing fields (30 total)
 
 ## Day 3 — Docker
 
-- [ ] Multi-stage Dockerfile, non-root user, XGBoost artifact only
-- [ ] `docker-compose.yml` to run API + Streamlit together locally
-- [ ] Point Streamlit at the API instead of loading the model itself, so there is one scoring path
-- [ ] Verify the same image runs locally and on AWS without changes
+- [x] Multi-stage Dockerfile, non-root user, XGBoost artifact only
+- [x] `docker-compose.yml` to run API + Streamlit together locally
+- [x] Streamlit calls `SCORER_API_URL` (default `http://127.0.0.1:8000`) instead of loading a model
+- [x] Image built and running locally via Colima (`docker compose up --build`)
 
 ## Day 4 — CI pipeline
 
-- [ ] `.github/workflows/ci.yml`: 24 unit tests, `ruff` lint, Docker build on every push
-- [ ] Branch protection so merges are blocked when any step fails
-- [ ] pip caching to keep runs fast
-- [ ] CI badge in `README.md`
+- [x] `.github/workflows/ci.yml`: pytest, ruff, Docker build on every push
+- [ ] Branch protection (GitHub setting, after the workflow is on `main`): require the CI check before merge
+- [x] pip caching
+- [x] CI badge in `README.md`
 
-## Day 5 — AWS deployment
-
-- [ ] Push image to ECR
-- [ ] Deploy to App Runner (less setup) or EC2 (more control, more to explain)
-- [ ] Config and secrets via environment variables — nothing hardcoded, nothing committed
-- [ ] Load test for p50/p95 latency; record numbers in the README
-- [ ] Extend CI to build and push on merge to `main`
-
-## Day 6 — MLflow versioning
-
-- [ ] Log params, metrics, and artifacts for all three models from `src/train.py`
-- [ ] Register XGBoost in the model registry with stages
-- [ ] Version the training data — hash the input CSVs and log the hash as a run tag, since 1.8GB
-      cannot go in git
-- [ ] API loads a specific registered version, not a loose file path
-
-## Day 7 — Drift monitoring and retraining trigger
-
-**PSI is written by hand, not pulled from a library**, so it can be explained in interviews.
-
-- [ ] Persist a reference distribution from the training set (bin edges + proportions per feature)
-- [ ] PSI implementation with unit tests: identical distributions score ~0, known shifts score as
-      expected, and empty bins do not divide by zero
-- [ ] Replay held-out test data in batches as the simulated incoming feed
-- [ ] Simulate realistic shifts: incomes down 15%, default rate rising, bureau scores degrading
-- [ ] Flag features above PSI 0.2; record the smallest shift the detector reliably catches
-- [ ] Retraining trigger script: retrain, evaluate against the current registered model, promote
-      only if it performs better on the shifted data
+AWS, MLflow, and drift monitoring are out of scope.
 
 ---
 

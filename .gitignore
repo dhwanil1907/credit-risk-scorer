@@ -1,8 +1,10 @@
 # Data files — too large for GitHub (>100MB), download from Kaggle
 data/
 
-# Trained model files — regenerate with python src/train.py
-models/
+# Large trained models — regenerate with python src/train.py
+# xgboost.pkl is small enough to commit so CI can build the image
+models/random_forest.pkl
+models/logistic_regression.pkl
 
 # Python
 __pycache__/

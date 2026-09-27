@@ -1,5 +1,7 @@
 # Home Credit Risk Scorer
 
+[![CI](https://github.com/dhwanil1907/credit-risk-scorer/actions/workflows/ci.yml/badge.svg)](https://github.com/dhwanil1907/credit-risk-scorer/actions/workflows/ci.yml)
+
 A production-style credit risk scoring system built on the [Kaggle Home Credit Default Risk](https://www.kaggle.com/competitions/home-credit-default-risk/data) dataset (~300,000 applicants). Three ML models are trained and compared head-to-head. A SHAP explainability layer shows exactly which factors drove each prediction. A business rules engine enforces hard policy caps on top of the model output — mirroring how real credit scoring systems work at lenders and bureaus.
 
 Results are exposed through an interactive Streamlit dashboard where you can adjust any applicant input and see the score, explanation, and any triggered policy rules update instantly.
