@@ -4,7 +4,7 @@
 
 A production-style credit risk scoring system built on the [Kaggle Home Credit Default Risk](https://www.kaggle.com/competitions/home-credit-default-risk/data) dataset (~300,000 applicants). Three ML models are trained and compared head-to-head. A SHAP explainability layer shows exactly which factors drove each prediction. A business rules engine enforces hard policy caps on top of the model output — mirroring how real credit scoring systems work at lenders and bureaus.
 
-Results are exposed through an interactive Streamlit dashboard where you can adjust any applicant input and see the score, explanation, and any triggered policy rules update instantly.
+The model is served by a FastAPI scoring API. A Streamlit dashboard calls that API, so you can adjust any applicant input and see the score, explanation, and any triggered policy rules update instantly. GitHub Actions runs lint and 30 tests on every push.
 
 ---
 
@@ -14,11 +14,11 @@ Evaluated on a held-out 20% test set. Thresholds are tuned per model to maximise
 
 | Model | ROC-AUC | F1 | Precision | Recall |
 |---|---|---|---|---|
-| XGBoost | 0.7784 | 0.3333 | 0.2861 | 0.3992 |
-| Logistic Regression | 0.7573 | 0.3051 | 0.2324 | 0.4439 |
-| Random Forest | 0.7404 | 0.2915 | 0.2451 | 0.3595 |
+| XGBoost | 0.7789 | 0.3314 | 0.2774 | 0.4115 |
+| Logistic Regression | 0.7573 | 0.3052 | 0.2362 | 0.4312 |
+| Random Forest | 0.7434 | 0.2963 | 0.2203 | 0.4522 |
 
-ROC-AUC of 0.778 means the model correctly ranks a random defaulter as riskier than a random non-defaulter 77.8% of the time. Top Kaggle scores on this competition are ~0.80.
+ROC-AUC of 0.779 means the model correctly ranks a random defaulter as riskier than a random non-defaulter 77.9% of the time. Top Kaggle scores on this competition are ~0.80.
 
 ---
 
@@ -36,10 +36,12 @@ data/
                                     src/explain.py ──▶ outputs/shap_*.png
                                            │
                                            ▼
-                                        app.py ──▶ Streamlit dashboard
-                                   (model score +        (risk score,
-                                    guardrails layer +    SHAP waterfall,
-                                    SHAP waterfall)       policy alerts)
+                              api.py (FastAPI, POST /predict)
+                          model score + guardrails + top SHAP reasons
+                                           │  HTTP
+                                           ▼
+                              app.py (Streamlit dashboard)
+                        sidebar inputs, score, SHAP waterfall, policy alerts
 ```
 
 ---
@@ -51,11 +53,14 @@ data/
 | `src/data_prep.py` | Loads up to 5 CSV tables, joins on applicant ID, cleans anomalies, encodes categoricals, engineers ratio and interaction features, splits train/test |
 | `src/train.py` | Trains XGBoost, Random Forest, Logistic Regression; tunes decision thresholds; saves model files and metrics |
 | `src/explain.py` | Computes SHAP values on XGBoost; saves global summary and per-applicant waterfall charts |
-| `app.py` | Streamlit app — sidebar inputs → model score → guardrails layer → SHAP explanation + policy alerts |
-| `tests/` | Pytest unit tests for all modules using synthetic data (no real CSVs required) |
+| `src/score.py`, `src/applicant.py` | Turn API input into model features, score with XGBoost, apply guardrails, pick top SHAP reasons |
+| `src/guardrails.py` | Business rules engine (policy caps) |
+| `api.py` | FastAPI service — `GET /health`, `POST /predict` with input validation |
+| `app.py` | Streamlit dashboard — sidebar inputs → calls the API → score, SHAP waterfall, policy alerts |
+| `.github/workflows/ci.yml` | ruff and pytest on every push and pull request |
+| `tests/` | 30 pytest tests (data prep, training, guardrails, SHAP, API) using synthetic data |
 | `outputs/` | `metrics.csv`, `feature_cols.json`, SHAP charts |
-| `models/` | Serialised model files — excluded from git, regenerate with `python src/train.py` |
-| `docs/concepts.md` | Deep-dive reference covering every algorithm, metric, and design decision used |
+| `models/` | `xgboost.pkl` is committed (2.4MB, used by the API and its tests); RF and LR are excluded, regenerate with `python src/train.py` |
 
 ---
 
@@ -84,9 +89,10 @@ The UI shows the raw model score and the policy-adjusted score separately, with 
 
 ## Setup
 
-**1. Install dependencies**
+**1. Install dependencies** (Python 3.13)
 ```bash
-pip install -r requirements.txt
+python3.13 -m venv .venv
+.venv/bin/pip install -r requirements.txt
 ```
 
 **2. Download data from Kaggle**
@@ -108,11 +114,12 @@ python src/train.py
 python src/explain.py
 ```
 
-**5. Launch the dashboard**
+**5. Start the API, then the dashboard** (two terminals)
 ```bash
-streamlit run app.py
+.venv/bin/uvicorn api:app --reload
+.venv/bin/streamlit run app.py
 ```
-Opens at `http://localhost:8501`.
+API at `http://localhost:8000`, dashboard at `http://localhost:8501`.
 
 **6. Run tests**
 ```bash
@@ -123,7 +130,8 @@ python -m pytest tests/ -v
 
 ## Key Design Decisions
 
-- **Train/serve consistency** — `app.py` runs the exact same `encode_categoricals` and `engineer_features` functions used at training time. `feature_cols.json` ensures column order never drifts.
+- **Single scoring path** — only the API loads the model; the dashboard is just a client.
+- **Train/serve consistency** — the API runs the exact same `encode_categoricals` and `engineer_features` functions used at training time. `feature_cols.json` ensures column order never drifts.
 - **Class imbalance** — 8% default rate handled with `scale_pos_weight` (XGBoost), `class_weight='balanced'` (RF, LR), and stratified splitting — not SMOTE.
 - **Threshold tuning** — each model's decision threshold is tuned to maximise F1 rather than using the default 0.5, which is meaningless for imbalanced data.
 - **Interaction features** — `EXT_MEAN × ANNUITY_INCOME_RATIO` and `DEBT_STRESS` were added after discovering the base model scored a borrower with 267% debt-to-income as Low Risk purely because external scores were high.
