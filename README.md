@@ -55,7 +55,6 @@ data/
 | `src/guardrails.py` | Business rules engine (policy caps) |
 | `api.py` | FastAPI service — `GET /health`, `POST /predict` with input validation |
 | `app.py` | Streamlit dashboard — sidebar inputs → calls the API → score, SHAP waterfall, policy alerts |
-| `.github/workflows/ci.yml` | ruff and pytest on every push and pull request |
 | `tests/` | 30 pytest tests (data prep, training, guardrails, SHAP, API) using synthetic data |
 | `outputs/` | `metrics.csv`, `feature_cols.json`, SHAP charts |
 | `models/` | `xgboost.pkl` is committed (2.4MB, used by the API and its tests); RF and LR are excluded, regenerate with `python src/train.py` |
