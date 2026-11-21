@@ -15,8 +15,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from src.labels import feature_label
-from src.score import Applicant, Scorer
+from src.score import Applicant, Scorer, feature_label
 
 
 class ApplicantRequest(BaseModel):
@@ -32,7 +31,6 @@ class ApplicantRequest(BaseModel):
     children: int = Field(default=0, ge=0, le=20)
     owns_car: bool = True
     owns_home: bool = True
-    gender: Literal["M", "F"] = "M"
     loan_type: Literal["cash", "revolving"] = "cash"
     past_loans: int = Field(default=3, ge=0, le=100)
     worst_late_days: int = Field(default=0, ge=0, le=3650)
@@ -102,7 +100,6 @@ def predict(body: ApplicantRequest, request: Request) -> PredictResponse:
             children=body.children,
             owns_car=body.owns_car,
             owns_home=body.owns_home,
-            gender=body.gender,
             loan_type=body.loan_type,
             past_loans=body.past_loans,
             worst_late_days=body.worst_late_days,

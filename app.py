@@ -50,12 +50,12 @@ def _waterfall_figure(X_row: pd.DataFrame, vals: np.ndarray, base: float) -> plt
 @st.cache_data
 def load_metrics_csv() -> pd.DataFrame:
     """
-    Load the model performance comparison table saved by train.py.
+    Load the model performance table saved by train.py.
 
-    This table was created when the models were trained and contains metrics
-    (ROC-AUC, F1, precision, recall) for all three models on the held-out
-    test set. It is displayed in the app so users can see how each model
-    compares. Cached so the file is only read from disk once per session.
+    This table was created when the model was trained and contains metrics
+    (ROC-AUC, F1, precision, recall) for the model on the held-out
+    test set. It is displayed in the app so users can see how accurate
+    it is. Cached so the file is only read from disk once per session.
     """
     return pd.read_csv(_ROOT / "outputs" / "metrics.csv")
 
@@ -125,7 +125,6 @@ def main() -> None:
     st.sidebar.markdown("### About them")
     age_years = st.sidebar.slider("Age", 18, 70, 35)
     years_employed = st.sidebar.slider("Years at current job", 0, 40, 5)
-    gender = "M" if st.sidebar.selectbox("Gender", ["Male", "Female"], index=0) == "Male" else "F"
     own_car = "Y" if st.sidebar.selectbox("Owns a car?", ["Yes", "No"], index=0) == "Yes" else "N"
     own_realty = "Y" if st.sidebar.selectbox("Owns a home?", ["Yes", "No"], index=0) == "Yes" else "N"
     children = st.sidebar.slider("Children", 0, 10, 0)
@@ -162,7 +161,6 @@ def main() -> None:
         "children": int(children),
         "owns_car": own_car == "Y",
         "owns_home": own_realty == "Y",
-        "gender": gender,
         "loan_type": "cash" if contract == "Cash loans" else "revolving",
         "past_loans": int(bureau_count),
         "worst_late_days": int(bureau_max_overdue),

@@ -16,7 +16,6 @@ from src.data_prep import (
     encode_categoricals,
     engineer_features,
     load_bureau_aggregates,
-    load_previous_application_aggregates,
     split_data,
 )
 
@@ -124,36 +123,6 @@ def test_load_bureau_aggregates_shape():
         "bureau_cnt_prolong_sum",   # total number of repayment extensions
     }
     assert expected_cols.issubset(result.columns), "Missing aggregate columns"
-
-
-def test_load_previous_application_aggregates_shape() -> None:
-    """
-    Check that previous application aggregation works correctly.
-
-    Applicant 1 made 2 prior loan applications (rows 0 and 1).
-    Applicant 2 made 1 prior application (row 2).
-    We verify:
-    - the output has the right columns
-    - applicant 1's application count equals 2
-    """
-    # Fake previous applications table: 2 applications for applicant 1, 1 for applicant 2
-    prev = pd.DataFrame(
-        {
-            "SK_ID_PREV": [10, 11, 12],           # unique ID per prior application
-            "SK_ID_CURR": [1, 1, 2],              # links back to the applicant
-            "AMT_CREDIT": [1000.0, 2000.0, 3000.0],         # how much credit was offered
-            "AMT_APPLICATION": [900.0, 1900.0, 2800.0],     # how much they applied for
-            "AMT_ANNUITY": [100.0, 200.0, 300.0],           # annual repayment on prior loan
-            "AMT_DOWN_PAYMENT": [50.0, 0.0, 100.0],         # down payment made
-        }
-    )
-    out = load_previous_application_aggregates(prev)
-
-    # The output must include applicant ID and at least the count and credit sum columns
-    assert {"SK_ID_CURR", "prev_app_count", "prev_amt_credit_sum"}.issubset(out.columns)
-
-    # Applicant 1 had 2 prior applications — the count must reflect that
-    assert out.loc[out["SK_ID_CURR"] == 1, "prev_app_count"].iloc[0] == 2
 
 
 def test_clean_application_handles_days_employed_anomaly():

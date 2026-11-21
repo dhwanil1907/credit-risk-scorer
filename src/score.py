@@ -11,12 +11,92 @@ import numpy as np
 import pandas as pd
 import shap
 
-from src.applicant import build_raw_applicant_frame, preprocess_for_model
+from src.data_prep import encode_categoricals, engineer_features
 from src.guardrails import apply_guardrails
-from src.labels import feature_label
 from src.shap_utils import coerce_shap_matrix, expected_value_scalar
 
 _ROOT = Path(__file__).resolve().parent.parent
+
+FEATURE_LABELS: dict[str, str] = {
+    "EXT_SOURCE_1": "Credit bureau score #1",
+    "EXT_SOURCE_2": "Credit bureau score #2",
+    "EXT_SOURCE_3": "Credit bureau score #3",
+    "EXT_MEAN": "Average credit bureau score",
+    "CREDIT_INCOME_RATIO": "Loan size vs. income",
+    "ANNUITY_INCOME_RATIO": "Yearly payments vs. income",
+    "DEBT_STRESS": "Overall debt pressure",
+    "EXT_MEAN_X_ANNUITY_RATIO": "Credit score × payment burden",
+    "EXT_MEAN_X_CREDIT_RATIO": "Credit score × loan size",
+    "AGE_YEARS": "Age",
+    "YEARS_EMPLOYED": "Years at current job",
+    "AMT_CREDIT": "Loan amount",
+    "AMT_INCOME_TOTAL": "Annual income",
+    "AMT_ANNUITY": "Yearly loan payment",
+    "AMT_GOODS_PRICE": "Price of what they are buying",
+    "CREDIT_TERM": "Loan length (months)",
+    "bureau_max_overdue": "Worst late-payment streak (days)",
+    "bureau_count": "Past loans on credit file",
+    "NAME_CONTRACT_TYPE": "Loan type",
+    "CNT_CHILDREN": "Number of children",
+}
+
+
+def feature_label(column: str) -> str:
+    return FEATURE_LABELS.get(column, column.replace("_", " ").title())
+
+
+def build_raw_applicant_frame(
+    contract: str,
+    own_car: str,
+    own_realty: str,
+    children: int,
+    income: float,
+    loan: float,
+    annuity: float,
+    goods_price: float,
+    age_years: int,
+    years_employed: int,
+    ext2: float,
+    ext3: float,
+    bureau_count: int,
+    bureau_max_overdue: int,
+    ext1: float = 0.5,
+) -> pd.DataFrame:
+    """
+    Build one applicant row from exactly the fields the form collects.
+    """
+    days_employed = -int(years_employed * 365) if years_employed > 0 else -30
+    return pd.DataFrame(
+        [
+            {
+                "NAME_CONTRACT_TYPE": contract,
+                "FLAG_OWN_CAR": own_car,
+                "FLAG_OWN_REALTY": own_realty,
+                "CNT_CHILDREN": int(children),
+                "AMT_INCOME_TOTAL": float(income),
+                "AMT_CREDIT": float(loan),
+                "AMT_ANNUITY": float(annuity),
+                "AMT_GOODS_PRICE": float(goods_price),
+                "DAYS_BIRTH": -int(age_years * 365),
+                "DAYS_EMPLOYED": days_employed,
+                "EXT_SOURCE_1": float(ext1),
+                "EXT_SOURCE_2": float(ext2),
+                "EXT_SOURCE_3": float(ext3),
+                "bureau_count": int(bureau_count),
+                "bureau_max_overdue": int(bureau_max_overdue),
+            }
+        ]
+    )
+
+
+def preprocess_for_model(raw_df: pd.DataFrame, feature_cols: list[str]) -> pd.DataFrame:
+    """Encode, engineer features, and order columns to match training."""
+    df = encode_categoricals(raw_df)
+    df = engineer_features(df)
+    for col in feature_cols:
+        if col not in df.columns:
+            df[col] = 0.0
+    return df[feature_cols].astype(np.float64)
 
 
 @dataclass(frozen=True)
@@ -33,7 +113,6 @@ class Applicant:
     children: int = 0
     owns_car: bool = True
     owns_home: bool = True
-    gender: str = "M"
     loan_type: str = "cash"
     past_loans: int = 3
     worst_late_days: int = 0
@@ -122,7 +201,6 @@ class Scorer:
         contract = "Cash loans" if applicant.loan_type == "cash" else "Revolving loans"
         raw = build_raw_applicant_frame(
             contract,
-            applicant.gender,
             "Y" if applicant.owns_car else "N",
             "Y" if applicant.owns_home else "N",
             applicant.children,
