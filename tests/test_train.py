@@ -1,7 +1,7 @@
 # =============================================================================
 # Tests for src/train.py
 #
-# These tests verify that each model trains without errors and produces
+# These tests verify that the model trains without errors and produces
 # sensible outputs. They use a small synthetic dataset (500 rows) so they
 # run quickly without needing the real Kaggle data files.
 #
@@ -13,8 +13,6 @@ import pandas as pd
 
 from src.train import (
     evaluate_model,
-    train_logistic_regression,
-    train_random_forest,
     train_xgboost,
 )
 
@@ -69,37 +67,6 @@ def test_train_xgboost_returns_model() -> None:
     assert len(preds) == len(X_test)
 
 
-def test_train_random_forest_returns_model() -> None:
-    """
-    Check that Random Forest trains successfully and produces one prediction per applicant.
-
-    Random Forest is an ensemble of many decision trees that vote on the outcome.
-    Using class_weight='balanced' ensures it pays enough attention to the rare defaults.
-    """
-    X_train, X_test, y_train, _y_test = _make_synthetic_split()
-    model = train_random_forest(X_train, y_train)
-    preds = model.predict(X_test)
-
-    # One prediction per applicant in the test set
-    assert len(preds) == len(X_test)
-
-
-def test_train_logistic_regression_returns_model() -> None:
-    """
-    Check that Logistic Regression trains successfully and produces one prediction per applicant.
-
-    Logistic Regression is the simplest of the three models — it learns a weighted
-    formula that combines all features into a single default probability.
-    It requires features to be on similar scales (handled internally by StandardScaler).
-    """
-    X_train, X_test, y_train, _y_test = _make_synthetic_split()
-    model = train_logistic_regression(X_train, y_train)
-    preds = model.predict(X_test)
-
-    # One prediction per applicant in the test set
-    assert len(preds) == len(X_test)
-
-
 def test_evaluate_model_returns_metrics() -> None:
     """
     Check that the evaluation function returns all required performance metrics
@@ -112,10 +79,9 @@ def test_evaluate_model_returns_metrics() -> None:
     - recall: of all actual defaulters, how many did the model catch?
     - confusion_matrix: a 2x2 table of correct/incorrect predictions
 
-    We use Logistic Regression here because it trains fastest on small data.
     """
     X_train, X_test, y_train, y_test = _make_synthetic_split()
-    model = train_logistic_regression(X_train, y_train)
+    model = train_xgboost(X_train, y_train)
     metrics = evaluate_model(model, X_test, y_test)
 
     # All five metric keys must be present in the returned dictionary

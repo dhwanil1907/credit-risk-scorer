@@ -1,9 +1,9 @@
 """
-Training utilities: three baseline classifiers, evaluation, persistence, and CLI pipeline.
+Training utilities: XGBoost classifier, evaluation, persistence, and CLI pipeline.
 
-This file trains three different models on the prepared data, measures how well
-each one performs, and saves them to disk so they can be loaded by the web app
-without needing to retrain every time.
+This file trains the XGBoost model on the prepared data, measures how well it
+performs, and saves it to disk so it can be loaded by the API without needing
+to retrain every time.
 """
 from __future__ import annotations
 
@@ -19,8 +19,6 @@ if str(_ROOT) not in sys.path:
 import joblib
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     confusion_matrix,
     f1_score,
@@ -30,8 +28,6 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 from sklearn.model_selection import train_test_split
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
 from xgboost import XGBClassifier
 
 from src.data_prep import load_dataset
@@ -43,7 +39,7 @@ def train_xgboost(X_train: pd.DataFrame, y_train: pd.Series) -> XGBClassifier:
 
     XGBoost builds many small decision trees one after another, where each new
     tree tries to correct the mistakes of the previous ones. It is generally the
-    most accurate of the three models we train.
+    most accurate model for this kind of data.
 
     Two important design choices here:
 
@@ -96,75 +92,6 @@ def train_xgboost(X_train: pd.DataFrame, y_train: pd.Series) -> XGBClassifier:
     )
     # Train the model, using the validation slice to know when to stop
     model.fit(X_tr, y_tr, eval_set=[(X_val, y_val)], verbose=False)
-    return model
-
-
-def train_random_forest(X_train: pd.DataFrame, y_train: pd.Series) -> RandomForestClassifier:
-    """
-    Train a Random Forest model — an ensemble of many independent decision trees.
-
-    Unlike XGBoost (which builds trees sequentially), a Random Forest builds
-    100 trees in parallel, each on a random sample of the data. The final
-    prediction is the majority vote across all 100 trees.
-
-    class_weight='balanced' is the Random Forest's equivalent of scale_pos_weight
-    in XGBoost — it automatically upweights the minority class (defaulters) so the
-    model does not ignore them. This is important because only ~8% of applicants
-    default, and without correction the model would mostly predict "safe".
-    """
-    # class_weight='balanced' sets tree sample weights inversely to class frequency (sklearn's
-    # counterpart to scale_pos_weight — helps rare default class without undersampling majors).
-    model = RandomForestClassifier(
-        n_estimators=100,              # Build 100 independent trees
-        class_weight="balanced",       # Compensate for the ~8% default rate
-        random_state=42,
-        n_jobs=-1,                     # Use all CPU cores
-    )
-    model.fit(X_train, y_train)
-    return model
-
-
-def train_logistic_regression(X_train: pd.DataFrame, y_train: pd.Series) -> Pipeline:
-    """
-    Train a Logistic Regression model — the simplest and most interpretable of the three.
-
-    Logistic Regression finds the best straight-line boundary between defaulters
-    and non-defaulters by assigning a weight to each input feature. It is less
-    powerful than XGBoost or Random Forest, but easier to audit and explain to
-    regulators or risk committees.
-
-    Two extra steps are required:
-
-    1. Feature scaling (StandardScaler):
-       Logistic Regression is sensitive to the scale of inputs. For example,
-       "income" might be in the hundreds of thousands while "number of children"
-       is 0–10. Without scaling, the model can struggle to find the right weights.
-       StandardScaler re-centres each column to have a mean of zero and a spread
-       of one, so all features are on a comparable scale.
-
-    2. Regularisation (C=0.1):
-       Many of our features are correlated (e.g. credit amount and goods price).
-       Regularisation prevents the model from placing extreme weights on correlated
-       features. A lower C value = stronger regularisation = more cautious weights.
-    """
-    # LR is sensitive to feature scale — StandardScaler (zero mean, unit variance) is required
-    # for lbfgs/saga to converge properly on mixed-magnitude credit features.
-    # saga solver handles large datasets faster than lbfgs and supports L1/L2.
-    # C=0.1 applies stronger L2 regularisation than default (C=1) to avoid overfit on
-    # correlated credit features.
-    model = Pipeline([
-        # Step 1: Scale all features to a comparable range
-        ("scaler", StandardScaler()),
-        # Step 2: Fit the logistic regression on the scaled features
-        ("lr", LogisticRegression(
-            C=0.1,                     # Regularisation strength (lower = more regularised)
-            solver="saga",             # Optimisation algorithm suited for large datasets
-            class_weight="balanced",   # Compensate for the ~8% default rate
-            max_iter=6000,             # Allow enough iterations to find a good solution
-            random_state=42,
-        )),
-    ])
-    model.fit(X_train, y_train)
     return model
 
 
@@ -279,23 +206,29 @@ def run_training_pipeline(app_path: str, bureau_path: str) -> None:
 
     This function:
     1. Loads and prepares the data (via load_dataset)
-    2. Trains all three models on the training set
-    3. Saves each model to the models/ folder as a .pkl file
-    4. Evaluates each model on the held-out test set
-    5. Saves a comparison table of performance metrics to outputs/metrics.csv
+    2. Splits off a threshold-tuning slice (15%) from the training set
+    3. Trains XGBoost on the rest and saves it to models/xgboost.pkl
+    4. Tunes the threshold on the tuning slice, then evaluates on the
+       held-out test set (the test set is never used to pick a threshold)
+    5. Saves the performance metrics to outputs/metrics.csv
     6. Prints a summary table to the console
     """
-    X_train, X_test, y_train, y_test = load_dataset(app_path, bureau_path)
+    X_train_full, X_test, y_train_full, y_test = load_dataset(app_path, bureau_path)
+
+    # Thresholds are tuned on this slice, not on the test set, so test metrics are not optimistic.
+    X_train, X_thresh, y_train, y_thresh = train_test_split(
+        X_train_full,
+        y_train_full,
+        test_size=0.15,
+        random_state=42,
+        stratify=y_train_full,
+    )
 
     models_dir = _ROOT / "models"
     models_dir.mkdir(parents=True, exist_ok=True)
 
-    # Train each model once, then save it and score it on the same held-out test set.
-    # Using the same test set for all three models ensures a fair, apples-to-apples comparison.
     specs: list[tuple[str, str, object]] = [
         ("xgboost", "xgboost.pkl", train_xgboost(X_train, y_train)),
-        ("random_forest", "random_forest.pkl", train_random_forest(X_train, y_train)),
-        ("logistic_regression", "logistic_regression.pkl", train_logistic_regression(X_train, y_train)),
     ]
 
     rows: list[dict[str, object]] = []
@@ -304,10 +237,10 @@ def run_training_pipeline(app_path: str, bureau_path: str) -> None:
         out_path = models_dir / fname
         save_model(fitted, out_path)
 
-        # Find the optimal decision threshold for this model, then evaluate at that threshold.
+        # Find the optimal decision threshold on the tuning slice, then evaluate at that threshold.
         # This is important because the default 50% threshold performs poorly when only
         # ~8% of applicants default — most models would flag almost nobody at 50%.
-        thresh = best_threshold(fitted, X_test, y_test)
+        thresh = best_threshold(fitted, X_thresh, y_thresh)
         m = evaluate_model(fitted, X_test, y_test, threshold=thresh)
         cm = m["confusion_matrix"]
         rows.append(
@@ -323,7 +256,7 @@ def run_training_pipeline(app_path: str, bureau_path: str) -> None:
             }
         )
 
-    # Save the performance comparison table to a CSV file (displayed in the web app)
+    # Save the performance metrics to a CSV file (displayed in the web app)
     out_dir = _ROOT / "outputs"
     out_dir.mkdir(parents=True, exist_ok=True)
     metrics_path = out_dir / "metrics.csv"
@@ -332,11 +265,11 @@ def run_training_pipeline(app_path: str, bureau_path: str) -> None:
     # Print a readable summary to the console (without the wide confusion matrix column)
     display = pd.DataFrame(rows).drop(columns=["confusion_matrix"])
     print(display.to_string(index=False))
-    print("\nNote: F1/precision/recall are computed at each model's optimal threshold (not 0.5).")
+    print("\nNote: F1/precision/recall are computed at the model's optimal threshold (not 0.5).")
 
 
 def main() -> None:
-    """Entry point when running this file directly: trains models on the standard data paths."""
+    """Entry point when running this file directly: trains the model on the standard data paths."""
     app_path = _ROOT / "data" / "application_train.csv"
     bureau_path = _ROOT / "data" / "bureau.csv"
     run_training_pipeline(str(app_path), str(bureau_path))
