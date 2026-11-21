@@ -2,7 +2,9 @@
 
 A production-style credit risk scoring system built on the [Kaggle Home Credit Default Risk](https://www.kaggle.com/competitions/home-credit-default-risk/data) dataset (~300,000 applicants). An XGBoost model is trained and evaluated on a held-out test set. A SHAP explainability layer shows exactly which factors drove each prediction. A business rules engine enforces hard policy caps on top of the model output — mirroring how real credit scoring systems work at lenders and bureaus.
 
-The model is served by a FastAPI scoring API. A Streamlit dashboard calls that API, so you can adjust any applicant input and see the score, explanation, and any triggered policy rules update instantly. The repo has 27 pytest tests (run locally) and a `ruff.toml` lint config.
+The model is served by a FastAPI scoring API. A Streamlit dashboard calls that API, so you can adjust any applicant input and see the score, explanation, and any triggered policy rules update instantly. The repo has 29 pytest tests (run locally) and a `ruff.toml` lint config.
+
+![Dashboard screenshot: safety score 84/100, Looks good, 5% estimated chance of missing payments, with plain-English reasons](assets/dashboard.png)
 
 ---
 
@@ -17,6 +19,27 @@ Thresholds are tuned on a 15% slice held out from the training set, never on the
 | XGBoost | 0.7581 | 0.3102 | 0.2430 | 0.4286 |
 
 ROC-AUC of 0.758 means the model correctly ranks a random defaulter as riskier than a random non-defaulter 75.8% of the time. Top Kaggle scores on this competition are ~0.80; this model is lower because it deliberately uses only 24 features that the dashboard/API can supply (an earlier 62-feature version, which also used gender and tables the API never received, scored 0.778).
+
+---
+
+### Calibration
+
+`scale_pos_weight` makes XGBoost over-predict default, so its raw probabilities are far too high. An isotonic-regression calibrator (`models/calibrator.pkl`) is fitted on the 15% slice of training data that XGBoost never saw, and the API's `default_probability` uses it. Checked on the held-out test set:
+
+| | Average predicted default | Brier score (lower is better) |
+|---|---|---|
+| Raw XGBoost | 39.3% | 0.185 |
+| Calibrated | 7.9% | 0.068 |
+
+The actual default rate on the test set is 8.1%. ROC-AUC is unchanged (the calibrator is monotonic). The SHAP waterfall explains the raw model output, so its bars are not in calibrated-probability units.
+
+The 0–100 safety score is derived from the calibrated default chance (`100 × (1 − chance / 0.30)`, so a 30%+ chance scores 0), and the risk bands use cut-offs of 70 and 40. On the held-out test set (61,503 applicants):
+
+| Band | Share of applicants | Actual default rate |
+|---|---|---|
+| Looks good (70+) | 70% | 4.0% |
+| Needs review (40–69) | 19% | 12.3% |
+| High risk (below 40) | 11% | 26.7% |
 
 ---
 
@@ -48,16 +71,16 @@ data/
 | File | What it does |
 |---|---|
 | `src/data_prep.py` | Loads 2 CSV tables (application, bureau), joins on applicant ID, cleans anomalies, encodes categoricals, engineers ratio and interaction features, splits train/test |
-| `src/train.py` | Trains XGBoost; tunes the decision threshold; saves the model and metrics |
+| `src/train.py` | Trains XGBoost; tunes the decision threshold; fits the probability calibrator; saves the model, calibrator and metrics |
 | `src/explain.py` | Computes SHAP values on XGBoost; saves global summary and per-applicant waterfall charts |
 | `src/score.py` | Turns API input into model features, scores with XGBoost, applies guardrails, picks top SHAP reasons, and holds the plain-English feature labels |
 | `src/guardrails.py` | Business rules engine (policy caps) |
 | `api.py` | FastAPI service — `GET /health`, `POST /predict` with input validation |
 | `app.py` | Streamlit dashboard — sidebar inputs → calls the API → score, SHAP waterfall, policy alerts |
 | `notebooks/eda.ipynb` | Exploratory data analysis: default rate by credit score, age, income, loan-to-income, loan type, education and bureau history, with takeaways. Outputs are saved in the notebook, so it renders on GitHub |
-| `tests/` | 27 pytest tests (data prep, training, guardrails, SHAP, API) using synthetic data |
+| `tests/` | 29 pytest tests (data prep, training, guardrails, SHAP, API) using synthetic data |
 | `outputs/` | `metrics.csv`, `feature_cols.json`, SHAP charts |
-| `models/` | `xgboost.pkl` is committed (3.1MB, used by the API and its tests); regenerate with `python src/train.py` |
+| `models/` | `xgboost.pkl` (2.2MB) and `calibrator.pkl` are committed (used by the API and its tests); regenerate with `python src/train.py` |
 
 ---
 
@@ -140,7 +163,7 @@ python -m pytest tests/ -v
 
 ## Known Limitations
 
-- **Scores are not calibrated probabilities.** XGBoost is trained with `scale_pos_weight`, which inflates predicted probabilities. `default_probability` and the 0–100 score (`(1 − p) × 100`) are useful for ranking applicants, but should not be read as literal default rates.
+- **Score scale and band cut-offs are my own choice.** The 0–100 score is `100 × (1 − calibrated default chance / 0.30)`, clipped at 0, and the 70 / 40 cut-offs were picked by hand, not tuned. The band results above are measured on the test set, but they depend on that choice.
 - **Median imputation is fit on the full dataset** before the train/test split, a small data leak.
 - **No fairness analysis.** Gender is not a model input, but other features (e.g. age) could still correlate with protected attributes; no fairness audit has been done.
 - **Policy caps are not data-driven.** The EDA notebook shows applicants with loan > 10× income default at 6.8% and with annuity > 50% of income at 7.6%, both below the 8.1% average. The guardrails are lending-policy overrides, not a pattern learned from this data.

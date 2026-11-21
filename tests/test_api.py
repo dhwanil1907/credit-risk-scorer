@@ -39,6 +39,7 @@ def test_predict_valid_applicant(client: TestClient) -> None:
     assert len(body["top_reasons"]) == 3
     assert len(body["contributions"]) >= 3
     assert "shap_base" in body
+    assert 0.0 <= body["default_probability"] <= 1.0
     assert body["top_reasons"][0]["label"]
     assert body["top_reasons"][0]["direction"] in {"helps", "hurts"}
 
@@ -72,3 +73,17 @@ def test_predict_malformed_payload(client: TestClient) -> None:
     response = client.post("/predict", json={**VALID, "yearly_income": "a lot"})
     assert response.status_code == 422
     assert response.json()["detail"][0]["field"] == "yearly_income"
+
+
+def test_probability_to_score_mapping() -> None:
+    from src.score import probability_to_score
+
+    assert probability_to_score(0.0) == 100
+    assert probability_to_score(0.30) == 0
+    assert probability_to_score(0.9) == 0
+    # Roughly the average default rate (~8%) lands just above the "Looks good" cut-off
+    assert probability_to_score(0.0807) == 73
+    # Lower default chance never gives a lower score
+    chances = [0.0, 0.02, 0.05, 0.1, 0.2, 0.3]
+    scores = [probability_to_score(chance) for chance in chances]
+    assert scores == sorted(scores, reverse=True)

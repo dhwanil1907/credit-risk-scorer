@@ -32,9 +32,9 @@ def _waterfall_figure(X_row: pd.DataFrame, vals: np.ndarray, base: float) -> plt
     Generate a personalised SHAP waterfall chart for the current applicant.
 
     A waterfall chart shows exactly how the model arrived at its prediction for
-    this one applicant. Starting from the average baseline probability, each bar
-    shows how much one feature pushed the score up (toward default) or down
-    (toward safe). The final position is the model's predicted default probability.
+    this one applicant. Starting from the average baseline, each bar shows how much
+    one feature pushed the raw model output up (toward default) or down (toward safe).
+    These are raw model units, not the calibrated default chance shown elsewhere.
     """
     explanation = shap.Explanation(
         values=vals,
@@ -179,7 +179,6 @@ def main() -> None:
     tier = str(scored["band"])
     tier_blurb, bg_color, text_color = _BANDS.get(tier, _BANDS["Needs review"])
     p_default = float(scored["default_probability"])
-    repay_pct = (1.0 - p_default) * 100.0
     triggered_rules = list(scored["rules_applied"])
     contributions = pd.DataFrame(scored["contributions"])
     shap_vals = contributions["shap"].to_numpy(dtype=float)
@@ -195,7 +194,8 @@ def main() -> None:
     st.title("Will this applicant pay the loan back?")
     st.markdown(
         f"**Safety score: {risk_score}/100** — {tier_blurb} "
-        f"The model estimates about **{repay_pct:.0f}%** chance of paying on time."
+        f"Estimated chance of missing payments: **{p_default * 100:.0f}%** "
+        f"(the average applicant in the training data is about 8%)."
     )
     st.divider()
 
@@ -241,10 +241,10 @@ def main() -> None:
         if model_score != risk_score:
             st.caption(
                 f"Before company rules: **{model_score}**. After rules: **{risk_score}**. "
-                f"Estimated miss-payment chance: **{p_default * 100:.0f}%**."
+                f"Estimated chance of missing payments: **{p_default * 100:.0f}%**."
             )
         else:
-            st.caption(f"Estimated miss-payment chance: **{p_default * 100:.0f}%**.")
+            st.caption(f"Estimated chance of missing payments: **{p_default * 100:.0f}%**.")
 
     with drivers_col:
         st.markdown("#### What helped or hurt?")
@@ -310,7 +310,8 @@ def main() -> None:
     st.divider()
 
     with st.expander("How accurate is the model? (test data)", expanded=False):
-        display_metrics = metrics_df.drop(columns=["confusion_matrix"], errors="ignore")
+        shown = ["model", "roc_auc", "f1", "precision", "recall", "threshold"]
+        display_metrics = metrics_df[[c for c in shown if c in metrics_df.columns]]
         numeric_cols = display_metrics.select_dtypes(include=[np.number]).columns
         formatted = display_metrics.copy()
         for c in numeric_cols:

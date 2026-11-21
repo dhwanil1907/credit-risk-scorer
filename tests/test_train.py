@@ -13,6 +13,7 @@ import pandas as pd
 
 from src.train import (
     evaluate_model,
+    fit_calibrator,
     train_xgboost,
 )
 
@@ -91,3 +92,27 @@ def test_evaluate_model_returns_metrics() -> None:
     # ROC-AUC must be a valid probability between 0 and 1
     # (even on random data it stays in this range — below 0.5 just means worse than random)
     assert 0.0 <= float(metrics["roc_auc"]) <= 1.0
+
+
+def test_fit_calibrator_pulls_inflated_scores_toward_the_real_default_rate() -> None:
+    """
+    XGBoost trained with scale_pos_weight over-predicts default. The calibrator should map
+    its scores back near the true default rate and keep the ranking of applicants intact.
+    """
+    X_train, X_test, y_train, y_test = _make_synthetic_split()
+    model = train_xgboost(X_train, y_train)
+    calibrator = fit_calibrator(model, X_test, y_test)
+
+    raw = model.predict_proba(X_test)[:, 1]
+    calibrated = calibrator.predict(raw)
+
+    # Calibrated outputs are valid probabilities
+    assert calibrated.min() >= 0.0 and calibrated.max() <= 1.0
+
+    # The mapping is monotonic: a higher raw score never gets a lower calibrated score
+    order = np.argsort(raw)
+    assert np.all(np.diff(calibrated[order]) >= -1e-12)
+
+    # Calibrated average sits closer to the true default rate than the raw average does
+    true_rate = float(np.asarray(y_test).mean())
+    assert abs(calibrated.mean() - true_rate) <= abs(raw.mean() - true_rate)

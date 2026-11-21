@@ -38,6 +38,10 @@ FEATURE_LABELS: dict[str, str] = {
     "bureau_count": "Past loans on credit file",
     "NAME_CONTRACT_TYPE": "Loan type",
     "CNT_CHILDREN": "Number of children",
+    "FLAG_OWN_CAR": "Owns a car",
+    "FLAG_OWN_REALTY": "Owns a home",
+    "DAYS_BIRTH": "Age (in days)",
+    "DAYS_EMPLOYED": "Time at current job (in days)",
 }
 
 
@@ -139,6 +143,18 @@ class ScoreResult:
     shap_base: float
 
 
+# A default chance at or above this value scores 0. With the 70 / 40 band cut-offs below,
+# "Looks good" means roughly the average default chance (~8%) or better, and "High risk"
+# means about 18% or worse.
+SCORE_ZERO_AT = 0.30
+
+
+def probability_to_score(default_probability: float) -> int:
+    """Map a calibrated default chance to a 0-100 score (100 = safest)."""
+    score = round(100.0 * (1.0 - default_probability / SCORE_ZERO_AT))
+    return max(0, min(100, int(score)))
+
+
 def risk_band(score: int) -> str:
     if score >= 70:
         return "Looks good"
@@ -188,10 +204,13 @@ class Scorer:
         self,
         model_path: Path | None = None,
         feature_cols_path: Path | None = None,
+        calibrator_path: Path | None = None,
     ) -> None:
         model_path = model_path or (_ROOT / "models" / "xgboost.pkl")
         feature_cols_path = feature_cols_path or (_ROOT / "outputs" / "feature_cols.json")
+        calibrator_path = calibrator_path or (_ROOT / "models" / "calibrator.pkl")
         self.model = joblib.load(model_path)
+        self.calibrator = joblib.load(calibrator_path)
         with open(feature_cols_path, encoding="utf-8") as handle:
             self.feature_cols: list[str] = json.load(handle)
         self.model_columns = model_feature_names(self.model)
@@ -218,8 +237,10 @@ class Scorer:
         )
         features = preprocess_for_model(raw, self.feature_cols)
         model_row = align_to_model(features, self.model_columns)
-        default_probability = float(self.model.predict_proba(model_row)[0, 1])
-        model_score = max(0, min(100, int(round((1.0 - default_probability) * 100))))
+        raw_probability = float(self.model.predict_proba(model_row)[0, 1])
+        # Raw output is inflated by scale_pos_weight, so calibrate it before scoring.
+        default_probability = float(self.calibrator.predict([raw_probability])[0])
+        model_score = probability_to_score(default_probability)
         score, rules = apply_guardrails(model_score, features)
         raw_shap = self.explainer.shap_values(model_row)
         shap_values = coerce_shap_matrix(raw_shap, (1, model_row.shape[1]))[0]

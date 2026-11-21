@@ -19,7 +19,9 @@ if str(_ROOT) not in sys.path:
 import joblib
 import numpy as np
 import pandas as pd
+from sklearn.isotonic import IsotonicRegression
 from sklearn.metrics import (
+    brier_score_loss,
     confusion_matrix,
     f1_score,
     precision_recall_curve,
@@ -127,6 +129,22 @@ def best_threshold(model, X_val: pd.DataFrame, y_val: pd.Series) -> float:
     return float(thresholds[np.argmax(f1_scores)])
 
 
+def fit_calibrator(model, X_cal: pd.DataFrame, y_cal: pd.Series) -> IsotonicRegression:
+    """
+    Learn a mapping from the model's raw score to a realistic default probability.
+
+    Training XGBoost with scale_pos_weight makes it over-predict default (it is told
+    each defaulter counts ~11x), so its raw probabilities are far above the real ~8%
+    default rate. Isotonic regression fits a monotonic step function from raw score to
+    the observed default rate on data the model never trained on. Because it is
+    monotonic, the ranking of applicants (and so ROC-AUC) is essentially unchanged.
+    """
+    raw_scores = model.predict_proba(X_cal)[:, 1]
+    calibrator = IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds="clip")
+    calibrator.fit(raw_scores, np.asarray(y_cal))
+    return calibrator
+
+
 def evaluate_model(
     model,
     X_test: pd.DataFrame,
@@ -208,10 +226,11 @@ def run_training_pipeline(app_path: str, bureau_path: str) -> None:
     1. Loads and prepares the data (via load_dataset)
     2. Splits off a threshold-tuning slice (15%) from the training set
     3. Trains XGBoost on the rest and saves it to models/xgboost.pkl
-    4. Tunes the threshold on the tuning slice, then evaluates on the
-       held-out test set (the test set is never used to pick a threshold)
-    5. Saves the performance metrics to outputs/metrics.csv
-    6. Prints a summary table to the console
+    4. Fits a probability calibrator on the tuning slice and saves it to models/calibrator.pkl
+    5. Tunes the threshold on the tuning slice, then evaluates on the
+       held-out test set (the test set is never used to pick a threshold or calibrate)
+    6. Saves the performance metrics to outputs/metrics.csv
+    7. Prints a summary table to the console
     """
     X_train_full, X_test, y_train_full, y_test = load_dataset(app_path, bureau_path)
 
@@ -243,6 +262,14 @@ def run_training_pipeline(app_path: str, bureau_path: str) -> None:
         thresh = best_threshold(fitted, X_thresh, y_thresh)
         m = evaluate_model(fitted, X_test, y_test, threshold=thresh)
         cm = m["confusion_matrix"]
+
+        # Calibrate on the same unseen slice, then check Brier score on the test set
+        # (lower is better; it measures how close predicted probabilities are to outcomes).
+        calibrator = fit_calibrator(fitted, X_thresh, y_thresh)
+        save_model(calibrator, models_dir / "calibrator.pkl")
+        raw_test = fitted.predict_proba(X_test)[:, 1]
+        cal_test = calibrator.predict(raw_test)
+        y_test_arr = np.asarray(y_test)
         rows.append(
             {
                 "model": name,
@@ -251,6 +278,11 @@ def run_training_pipeline(app_path: str, bureau_path: str) -> None:
                 "precision": m["precision"],
                 "recall": m["recall"],
                 "threshold": round(thresh, 4),
+                "brier_raw": brier_score_loss(y_test_arr, raw_test),
+                "brier_calibrated": brier_score_loss(y_test_arr, cal_test),
+                "mean_predicted_raw": float(raw_test.mean()),
+                "mean_predicted_calibrated": float(cal_test.mean()),
+                "actual_default_rate": float(y_test_arr.mean()),
                 # Store the confusion matrix as a list so it fits in one CSV cell
                 "confusion_matrix": np.asarray(cm).tolist(),
             }
