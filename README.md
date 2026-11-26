@@ -12,7 +12,12 @@ The model is served by a FastAPI scoring API. A Streamlit dashboard calls that A
 
 Evaluated on a held-out 20% test set. The decision threshold is tuned to maximise F1 on the ~8% default rate — not left at the default 0.5 cutoff.
 
-Thresholds are tuned on a 15% slice held out from the training set, never on the test set.
+The data is split three ways, and the test set is never used to fit, tune or calibrate anything:
+- **Test set (20%)** — all reported metrics.
+- **Tuning slice (15% of the remaining training data)** — used to pick the decision threshold and fit the calibrator.
+- **Early-stopping slice (12% of what is left)** — used only to decide when XGBoost stops adding trees.
+
+The threshold is on the raw XGBoost probability scale (0.65 here, above 0.5 because `scale_pos_weight` inflates raw probabilities).
 
 | Model | ROC-AUC | F1 | Precision | Recall |
 |---|---|---|---|---|
@@ -74,6 +79,7 @@ data/
 | `src/train.py` | Trains XGBoost; tunes the decision threshold; fits the probability calibrator; saves the model, calibrator and metrics |
 | `src/explain.py` | Computes SHAP values on XGBoost; saves global summary and per-applicant waterfall charts |
 | `src/score.py` | Turns API input into model features, scores with XGBoost, applies guardrails, picks top SHAP reasons, and holds the plain-English feature labels |
+| `src/shap_utils.py` | Helpers that normalise SHAP output shapes and the baseline value, shared by `score.py` and `explain.py` |
 | `src/guardrails.py` | Business rules engine (policy caps) |
 | `api.py` | FastAPI service — `GET /health`, `POST /predict` with input validation |
 | `app.py` | Streamlit dashboard — sidebar inputs → calls the API → score, SHAP waterfall, policy alerts |

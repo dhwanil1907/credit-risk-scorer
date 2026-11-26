@@ -114,7 +114,9 @@ def best_threshold(model, X_val: pd.DataFrame, y_val: pd.Series) -> float:
     F1 score balances both concerns: it rewards the model for catching actual
     defaulters (recall) without flagging too many safe applicants (precision).
     This function tests many possible thresholds and returns the one with the
-    highest F1 — typically around 0.2–0.35 for credit default models.
+    highest F1. Because scale_pos_weight inflates the raw probabilities, the
+    result is on the raw (uncalibrated) scale and can be well above 0.5
+    (0.65 on the current model).
     """
     # Get the model's probability estimates for every applicant in the validation set
     y_score = model.predict_proba(X_val)[:, 1]
